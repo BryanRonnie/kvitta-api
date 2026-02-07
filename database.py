@@ -34,3 +34,8 @@ async def get_users_collection():
     """Get users collection"""
     database = await get_database()
     return database.users
+
+async def get_groups_collection():
+    """Get groups collection"""
+    database = await get_database()
+    return database.groups

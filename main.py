@@ -14,6 +14,7 @@ from openai import OpenAI
 
 # Import auth routes and database
 from auth_routes import router as auth_router
+from groups_routes import router as groups_router
 from database import connect_to_mongo, close_mongo_connection
 
 load_dotenv()
@@ -41,6 +42,8 @@ async def shutdown_db_client():
 
 # Include authentication routes
 app.include_router(auth_router)
+# Include groups routes
+app.include_router(groups_router)
 
 # NVAI endpoint for the ocdrnet NIM
 NVAI_URL = "https://ai.api.nvidia.com/v1/cv/nvidia/ocdrnet"

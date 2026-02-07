@@ -3,7 +3,7 @@ User models and schemas
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 from pydantic import BaseModel, EmailStr, Field
 
 class UserCreate(BaseModel):
@@ -44,3 +44,32 @@ class Token(BaseModel):
 class TokenData(BaseModel):
     """Schema for token payload"""
     email: Optional[str] = None
+
+class GroupMember(BaseModel):
+    """Schema for group member"""
+    email: EmailStr
+    role: str = "member"  # member | admin
+    joined_at: datetime
+
+class GroupCreate(BaseModel):
+    """Schema for creating a group"""
+    name: str = Field(..., min_length=2, max_length=100)
+    description: Optional[str] = Field(default=None, max_length=500)
+
+class GroupUpdateRole(BaseModel):
+    """Schema for updating member role"""
+    role: str = Field(..., pattern="^(member|admin)$")
+
+class GroupAddMember(BaseModel):
+    """Schema for adding member by email"""
+    email: EmailStr
+
+class GroupResponse(BaseModel):
+    """Schema for group response"""
+    id: str
+    name: str
+    description: Optional[str] = None
+    created_by: EmailStr
+    created_at: datetime
+    updated_at: datetime
+    members: List[GroupMember]
