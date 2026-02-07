@@ -72,7 +72,7 @@ async def create_group(group_data: GroupCreate, current_user: UserInDB = Depends
         "created_at": now,
         "updated_at": now,
         "members": members,
-        "folder_id": getattr(group_data, 'folder_id', None),
+        "folder_id": group_data.folder_id,
     }
 
     result = await groups_collection.insert_one(group_doc)

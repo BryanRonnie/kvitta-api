@@ -55,6 +55,7 @@ class GroupCreate(BaseModel):
     """Schema for creating a group"""
     name: str = Field(..., min_length=2, max_length=100)
     description: Optional[str] = Field(default=None, max_length=500)
+    folder_id: Optional[str] = Field(default=None)
 
 class GroupUpdateRole(BaseModel):
     """Schema for updating member role"""

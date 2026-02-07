@@ -1,6 +1,2 @@
 .env
-__pycache__/auth_routes.cpython-313.pyc
-__pycache__/auth_utils.cpython-313.pyc
-__pycache__/database.cpython-313.pyc
-__pycache__/main.cpython-313.pyc
-__pycache__/models.cpython-313.pyc
+__pycache__/
