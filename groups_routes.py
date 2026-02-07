@@ -32,6 +32,7 @@ def serialize_group(group: dict) -> dict:
         "created_at": group["created_at"],
         "updated_at": group["updated_at"],
         "members": group["members"],
+        "folder_id": group.get("folder_id"),
     }
 
 
@@ -71,6 +72,7 @@ async def create_group(group_data: GroupCreate, current_user: UserInDB = Depends
         "created_at": now,
         "updated_at": now,
         "members": members,
+        "folder_id": getattr(group_data, 'folder_id', None),
     }
 
     result = await groups_collection.insert_one(group_doc)

@@ -39,3 +39,8 @@ async def get_groups_collection():
     """Get groups collection"""
     database = await get_database()
     return database.groups
+
+async def get_folders_collection():
+    """Get folders collection"""
+    database = await get_database()
+    return database.folders

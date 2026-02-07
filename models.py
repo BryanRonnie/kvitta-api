@@ -73,3 +73,19 @@ class GroupResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     members: List[GroupMember]
+    folder_id: Optional[str] = None
+
+class FolderCreate(BaseModel):
+    """Schema for creating a folder"""
+    name: str = Field(..., min_length=2, max_length=100)
+    color: str = Field(default="#6366F1", pattern="^#[0-9A-Fa-f]{6}$")
+
+class FolderResponse(BaseModel):
+    """Schema for folder response"""
+    id: str
+    name: str
+    color: str
+    created_by: EmailStr
+    created_at: datetime
+    updated_at: datetime
+    receipt_count: int = 0
