@@ -238,3 +238,23 @@ async def leave_group(group_id: str, current_user: UserInDB = Depends(get_curren
                 )
 
     return {"message": "Left group"}
+
+
+@router.delete("/{group_id}")
+async def delete_group(group_id: str, current_user: UserInDB = Depends(get_current_user)):
+    groups_collection = await get_groups_collection()
+
+    try:
+        group = await groups_collection.find_one({"_id": ObjectId(group_id)})
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid group id")
+
+    if not group:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
+
+    # Only admins can delete the group
+    ensure_admin(group["members"], current_user.email)
+
+    await groups_collection.delete_one({"_id": ObjectId(group_id)})
+
+    return {"message": "Group deleted"}
