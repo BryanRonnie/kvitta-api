@@ -78,6 +78,27 @@ PATTERNS:
 - Price: "$X each", price near item name
 - Ignore UI noise like "|", stray numbers, icons
 
+IMPORTANT: Use the field name "line_subtotal" (NOT "total_price") for the item total.
+The line_subtotal is the total price for that line item (quantity × unit_price).
+
+EXAMPLE OUTPUT:
+{
+  "line_items": [
+    {
+      "name_raw": "Organic Bananas",
+      "quantity": 2,
+      "unit_price": 0.50,
+      "line_subtotal": 1.00
+    },
+    {
+      "name_raw": "Whole Milk",
+      "quantity": 1,
+      "unit_price": 4.99,
+      "line_subtotal": 4.99
+    }
+  ]
+}
+
 OUTPUT JSON ONLY:
 {
   "line_items": [
