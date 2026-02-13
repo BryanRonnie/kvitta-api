@@ -1,16 +1,15 @@
 import os
-import uuid
-import zipfile
-import json
-import tempfile
 from typing import List, Dict, Optional
-
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-import requests
 from openai import OpenAI
+import pytesseract
+import cv2
+import numpy as np
+import base64
+from ocr.llama import call_nvidia_llama_vision
 
 # Import auth routes and database
 from auth_routes import router as auth_router
@@ -18,10 +17,15 @@ from groups_routes import router as groups_router
 from folders_routes import router as folders_router
 from receipts_routes import router as receipts_router
 from database import connect_to_mongo, close_mongo_connection
-
-load_dotenv()
+from ocr.mistral_routes import router as mistral_router
 
 app = FastAPI(title="Kvitta API")
+
+# Load environment variables from .env file
+load_dotenv()
+
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 # Allow all CORS for now
 app.add_middleware(
@@ -50,10 +54,20 @@ app.include_router(groups_router)
 app.include_router(folders_router)
 # Include receipts routes
 app.include_router(receipts_router)
+# Include Mistral OCR routes
+app.include_router(mistral_router)
+
 
 # NVAI endpoint for the ocdrnet NIM
 NVAI_URL = "https://ai.api.nvidia.com/v1/cv/nvidia/ocdrnet"
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
+
+HEADER_AUTH = f"Bearer {NVIDIA_API_KEY}"
+
+# Initialize OpenAI client for Nvidia LLM reasoning model
+openai_client = OpenAI(
+    base_url="https://integrate.api.nvidia.com/v1",
+    api_key=NVIDIA_API_KEY
+)
 
 PROMPT_ITEMS = """
 You are an item-reconstruction engine for Instacart receipts.
@@ -88,13 +102,15 @@ EXAMPLE OUTPUT:
       "name_raw": "Organic Bananas",
       "quantity": 2,
       "unit_price": 0.50,
-      "line_subtotal": 1.00
+      "line_subtotal": 1.00,
+      "taxable":true
     },
     {
       "name_raw": "Whole Milk",
       "quantity": 1,
       "unit_price": 4.99,
-      "line_subtotal": 4.99
+      "line_subtotal": 4.99,
+      "taxable":false
     }
   ]
 }
@@ -106,11 +122,14 @@ OUTPUT JSON ONLY:
       "name_raw": string,
       "quantity": number,
       "unit_price": number | null,
-      "line_subtotal": number | null
+      "line_subtotal": number | null,
+      "taxable": boolean
     }
   ]
 }
 """
+
+from ocr.instructions import ONTARIO_HST_RULES
 
 PROMPT_CHARGES = """
 You are a receipt totals extractor.
@@ -166,402 +185,264 @@ FEE TAXABILITY RULES:
 if not NVIDIA_API_KEY:
     print("WARNING: NVIDIA_API_KEY environment variable not set - Nvidia OCR will not work")
 
-HEADER_AUTH = f"Bearer {NVIDIA_API_KEY}"
-
-# Initialize OpenAI client for Nvidia LLM reasoning model
-openai_client = OpenAI(
-    base_url="https://integrate.api.nvidia.com/v1",
-    api_key=NVIDIA_API_KEY
-)
 
 
-def _upload_asset(input_data: bytes, description: str) -> uuid.UUID:
-    """
-    Uploads an asset to the NVCF API.
+def detect_rounded_boxes(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-    :param input_data: The binary asset to upload
-    :param description: A description of the asset
-    :return: Asset UUID
-    """
-    assets_url = "https://api.nvcf.nvidia.com/v2/nvcf/assets"
-
-    headers = {
-        "Authorization": HEADER_AUTH,
-        "Content-Type": "application/json",
-        "accept": "application/json",
-    }
-
-    s3_headers = {
-        "x-amz-meta-nvcf-asset-description": description,
-        "content-type": "image/jpeg",
-    }
-
-    payload = {"contentType": "image/jpeg", "description": description}
-
-    response = requests.post(assets_url, headers=headers, json=payload, timeout=30)
-    response.raise_for_status()
-
-    asset_url = response.json()["uploadUrl"]
-    asset_id = response.json()["assetId"]
-
-    response = requests.put(
-        asset_url,
-        data=input_data,
-        headers=s3_headers,
-        timeout=300,
+    # Adaptive threshold works better for subtle UI differences
+    thresh = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        51, 5
     )
-    response.raise_for_status()
 
-    return uuid.UUID(asset_id)
+    # Merge broken borders
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    boxes = []
+
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < 30000:   # adjust if needed
+            continue
+
+        x, y, w, h = cv2.boundingRect(cnt)
+
+        aspect_ratio = w / float(h)
+
+        # Cards are wide rectangles
+        if 2.0 < aspect_ratio < 10:
+            boxes.append((x, y, w, h))
+
+    # Sort top to bottom
+    boxes = sorted(boxes, key=lambda b: b[1])
+
+    return boxes
 
 
-def box_stats(polygon: Dict) -> Dict:
-    """Calculate bounding box statistics from polygon coordinates."""
-    xs = [polygon["x1"], polygon["x2"], polygon["x3"], polygon["x4"]]
-    ys = [polygon["y1"], polygon["y2"], polygon["y3"], polygon["y4"]]
-    return {
-        "xmin": min(xs),
-        "xmax": max(xs),
-        "ymin": min(ys),
-        "ymax": max(ys),
-        "xc": sum(xs) / 4.0,
-        "yc": sum(ys) / 4.0,
-        "h": max(ys) - min(ys),
-    }
+def detect_cards_projection(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # Strong binarization
+    _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
+
+    # Sum pixels per row
+    row_sums = np.sum(thresh, axis=1)
+
+    height = image.shape[0]
+
+    # Normalize
+    row_sums = row_sums / np.max(row_sums)
+
+    # Detect blank rows (low content)
+    blank_rows = row_sums < 0.02
+
+    segments = []
+    in_segment = False
+    start = 0
+
+    for i in range(height):
+        if not blank_rows[i] and not in_segment:
+            start = i
+            in_segment = True
+        elif blank_rows[i] and in_segment:
+            end = i
+            if end - start > 80:  # minimum card height
+                segments.append((start, end))
+            in_segment = False
+
+    boxes = []
+
+    for (y1, y2) in segments:
+        # Crop full width (or slightly inset)
+        boxes.append((0, y1, image.shape[1], y2 - y1))
+
+    return boxes
+
+def split_card(card_img):
+    TARGET_WIDTH = 1000
+
+    h, w = card_img.shape[:2]
+
+    # 1️⃣ Resize to fixed width
+    scale = TARGET_WIDTH / w
+    new_h = int(h * scale)
+    card_resized = cv2.resize(card_img, (TARGET_WIDTH, new_h))
+
+    h2, w2 = card_resized.shape[:2]
+
+    # 2️⃣ Absolute pixel cuts (tuned once)
+    LEFT_CUT = 180           # left product image width
+    PRICE_COLUMN_WIDTH = 160 # right price column width
+    TOP_PRICE_HEIGHT = 80   # absolute top area for price
+
+    # Remove left image
+    content = card_resized[:, LEFT_CUT:]
+
+    # Extract price column
+    price_column = content[:, -PRICE_COLUMN_WIDTH:]
+
+    # Absolute top crop
+    price_crop = price_column[:TOP_PRICE_HEIGHT, :]
+
+    # Middle full (exclude price column)
+    middle_crop_full = content[:, :-PRICE_COLUMN_WIDTH]
+
+    # Optional: top-only middle crop
+    middle_crop_top = middle_crop_full[:TOP_PRICE_HEIGHT, :]
+
+    return middle_crop_full, middle_crop_top, price_crop
 
 
-def stitch_lines(
-    metadata: List[Dict],
-    y_overlap_ratio: float = 0.6,
-    max_y_gap_factor: float = 0.7
-) -> List[str]:
+# ---------- ENCODER ----------
+def encode_image(img):
+    _, buffer = cv2.imencode(".png", img)
+    return base64.b64encode(buffer).decode("utf-8")
+
+
+import json as json_lib
+
+def extract_json_from_response(response_str: str) -> Optional[Dict]:
     """
-    Stitches detected text boxes into logical lines.
-
-    :param metadata: List of detected text boxes with labels and polygons
-    :param y_overlap_ratio: Minimum vertical overlap ratio to consider same line
-    :param max_y_gap_factor: Maximum vertical gap factor relative to box height
-    :return: List of stitched text lines
+    Extract JSON from LLM response which may contain markdown formatting.
+    
+    Tries to:
+    1. Parse as-is (if response is pure JSON)
+    2. Extract from ```json ... ``` blocks
+    3. Find first { and last } and parse that
+    
+    Returns parsed dict or None if no valid JSON found.
     """
-    words = []
-    for item in metadata:
-        b = box_stats(item["polygon"])
-        words.append({
-            "text": item["label"],
-            **b
-        })
+    try:
+        # Try direct JSON parse
+        return json_lib.loads(response_str)
+    except json_lib.JSONDecodeError:
+        pass
+    
+    # Try to find ```json...``` block
+    import re
+    match = re.search(r'```(?:json)?\s*\n(.*?)\n```', response_str, re.DOTALL)
+    if match:
+        try:
+            return json_lib.loads(match.group(1))
+        except json_lib.JSONDecodeError:
+            pass
+    
+    # Try to find { ... } content
+    start = response_str.find('{')
+    if start != -1:
+        end = response_str.rfind('}')
+        if end != -1 and end > start:
+            try:
+                return json_lib.loads(response_str[start:end+1])
+            except json_lib.JSONDecodeError:
+                pass
+    
+    return None
 
-    # Sort top-to-bottom
-    words.sort(key=lambda w: w["yc"])
 
-    lines = []
+# ---------- API ----------
+@app.post("/upload")
+async def upload_image(
+    receipt_items: List[UploadFile] = File(...),
+    charges_image: Optional[UploadFile] = File(None)
+):
+    """
+    Process multiple receipt item images and optional charges image.
+    
+    Args:
+        receipt_items: Multiple receipt item images to process and merge
+        charges_image: Optional charges/totals image
+    
+    Returns:
+        Merged results from all receipt item images
+    """
+    if not receipt_items:
+        return JSONResponse(status_code=400, content={"error": "Must provide at least one receipt item image"})
 
-    for w in words:
-        placed = False
-        for line in lines:
-            # reference line vertical center and height
-            ref_y = line["yc"]
-            ref_h = line["h"]
+    all_results = []
 
-            y_dist = abs(w["yc"] - ref_y)
-            allowed = max(w["h"], ref_h) * max_y_gap_factor
+    # Process each receipt item image
+    for file in receipt_items:
+        contents = await file.read()
+        np_arr = np.frombuffer(contents, np.uint8)
+        image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
-            # vertical overlap test
-            overlap = min(w["ymax"], line["ymax"]) - max(w["ymin"], line["ymin"])
+        if image is None:
+            continue  # Skip invalid images
 
-            if overlap > min(w["h"], ref_h) * y_overlap_ratio or y_dist <= allowed:
-                line["words"].append(w)
-                # update line envelope
-                line["ymin"] = min(line["ymin"], w["ymin"])
-                line["ymax"] = max(line["ymax"], w["ymax"])
-                line["yc"] = (line["ymin"] + line["ymax"]) / 2
-                line["h"] = line["ymax"] - line["ymin"]
-                placed = True
-                break
+        boxes = detect_rounded_boxes(image)
 
-        if not placed:
-            lines.append({
-                "words": [w],
-                "ymin": w["ymin"],
-                "ymax": w["ymax"],
-                "yc": w["yc"],
-                "h": w["h"],
+        for (x, y, w, h) in boxes:
+            card = image[y:y+h, x:x+w]
+
+            middle_full, middle, price = split_card(card)
+
+            middle_text = run_ocr_on_crop(middle)
+            middle_full_text = run_ocr_on_crop(middle_full)
+            price_text = run_ocr_on_crop(price)
+
+            all_results.append({
+                # "middle": encode_image(middle),
+                # "price": encode_image(price),
+                "middle_text": middle_text,
+                "middle_text_full": middle_full_text,
+                "price_text": price_text
             })
 
-    # Sort words left-to-right inside each line
-    stitched = []
-    for line in lines:
-        line["words"].sort(key=lambda w: w["xmin"])
-        stitched.append(" ".join(w["text"] for w in line["words"]))
-
-    return stitched
-
-
-async def _process_ocr_response(response: requests.Response) -> Dict:
-    """
-    Process OCR response from Nvidia API.
-    Handles both JSON and zip file responses.
-
-    :param response: Response object from Nvidia OCR API
-    :return: Metadata dictionary containing detections
-    """
-    content_type = response.headers.get("content-type", "")
-
-    if "application/json" in content_type:
-        return response.json()
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        zip_path = os.path.join(temp_dir, "output.zip")
-
-        with open(zip_path, "wb") as out:
-            out.write(response.content)
-
-        with zipfile.ZipFile(zip_path, "r") as z:
-            z.extractall(temp_dir)
-
-        files = os.listdir(temp_dir)
-        metadata_files = [f for f in files if f.endswith(".response") or f.endswith(".json")]
-
-        if not metadata_files:
-            raise HTTPException(
-                status_code=500,
-                detail=f"No metadata file found in OCR response. Files in zip: {files}"
-            )
-
-        metadata_path = os.path.join(temp_dir, metadata_files[0])
-        with open(metadata_path, "r") as f:
-            return json.load(f)
-
-
-async def reason_with_llm(
-    prompt: str,
-    temperature: float = 0.6,
-    max_tokens: int = 4096
-) -> Dict:
-    """
-    Use Nvidia Nemotron Nano 9B v2 to analyze and reason about text.
-
-    :param prompt: The prompt to send to the model
-    :param temperature: Temperature for generation (0.0-2.0), default 0.6
-    :param max_tokens: Maximum tokens to generate, default 4096
-    :return: Dictionary with reasoning content and final response
-    """
-    if not NVIDIA_API_KEY:
-        raise HTTPException(
-            status_code=500,
-            detail="NVIDIA_API_KEY not configured on server"
-        )
-
-    try:
-        reasoning_content = ""
-        final_response = ""
-
-        completion = openai_client.chat.completions.create(
-            model="nvidia/nvidia-nemotron-nano-9b-v2",
-            messages=[
-                {"role": "system", "content": "/think"},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=temperature,
-            top_p=0.95,
-            max_tokens=max_tokens,
-            frequency_penalty=0,
-            presence_penalty=0,
-            stream=True,
-            extra_body={
-                "min_thinking_tokens": 500,
-                "max_thinking_tokens": 2000
-            }
-        )
-
-        for chunk in completion:
-            if not getattr(chunk, "choices", None):
-                continue
-
-            reasoning = getattr(chunk.choices[0].delta, "reasoning_content", None)
-            if reasoning:
-                reasoning_content += reasoning
-
-            if chunk.choices and chunk.choices[0].delta.content is not None:
-                final_response += chunk.choices[0].delta.content
-
-        return {
-            "success": True,
-            "reasoning": reasoning_content,
-            "response": final_response
+    results_for_llm = [
+        {
+            "middle_text": item.get("middle_text"),
+            "price_text": item.get("price_text")
         }
+        for item in all_results
+    ]
+    response:str = str(call_nvidia_llama_vision(None, PROMPT_ITEMS + ONTARIO_HST_RULES + str(results_for_llm)))
+    response_json = extract_json_from_response(response)
 
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"LLM reasoning failed: {str(e)}"
-        )
+    charges_images_base64 = None
+    if charges_image is not None:
+        charges_bytes = await charges_image.read()
+        charges_mime_type = charges_image.content_type or "image/jpeg"
+        charges_base64 = base64.b64encode(charges_bytes).decode("utf-8")
+        charges_images_base64 = [(charges_mime_type, charges_base64)]
 
+    response2:str = str(call_nvidia_llama_vision(charges_images_base64, PROMPT_CHARGES + str(results_for_llm)))
+    response2_json = extract_json_from_response(response2)
 
-@app.post("/nvidia-ocr/extract-text")
-async def extract_text_nvidia(
-    receipt_pdf: Optional[UploadFile] = File(None),
-    items_images: Optional[List[UploadFile]] = File(None),
-    charges_image: Optional[UploadFile] = File(None),
-    run_llm: bool = True,
-    llm_temperature: float = 0.6,
-    llm_max_tokens: int = 4096
-):
-    """
-    Extract text from receipt using Nvidia OCDRNet model.
-
-    Supports two modes:
-    1. PDF mode: receipt_pdf file
-    2. Image mode: items_images (multiple) + charges_image (single)
-
-    :param receipt_pdf: PDF file of receipt (optional)
-    :param items_images: Multiple images showing items (optional)
-    :param charges_image: Single image showing charges/totals (optional)
-    :param run_llm: Whether to run LLM analysis on extracted text
-    :return: JSON with stitched text lines and optional LLM analysis
-    """
-    if not NVIDIA_API_KEY:
-        raise HTTPException(
-            status_code=500,
-            detail="NVIDIA_API_KEY not configured on server"
-        )
-
-    if receipt_pdf:
-        upload_mode = "pdf"
-    elif items_images and charges_image:
-        upload_mode = "images"
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail="Must provide either receipt_pdf OR (items_images + charges_image)"
-        )
-
-    try:
-        if upload_mode == "pdf":
-            # PDF processing not yet implemented
-            raise HTTPException(
-                status_code=501,
-                detail="PDF processing not yet implemented. Use image mode for now."
-            )
-
-        # images mode
-        items_texts = []
-        for item_image in items_images:
-            image_data = await item_image.read()
-
-            asset_id = _upload_asset(image_data, "Items Image")
-
-            inputs = {"image": f"{asset_id}", "render_label": False}
-            asset_list = f"{asset_id}"
-
-            headers = {
-                "Content-Type": "application/json",
-                "NVCF-INPUT-ASSET-REFERENCES": asset_list,
-                "NVCF-FUNCTION-ASSET-IDS": asset_list,
-                "Authorization": HEADER_AUTH,
-            }
-
-            response = requests.post(NVAI_URL, headers=headers, json=inputs, timeout=60)
-            response.raise_for_status()
-
-            metadata = await _process_ocr_response(response)
-            detections = metadata.get("metadata", metadata.get("detections", metadata.get("data", []))) if isinstance(metadata, dict) else metadata
-            stitched_lines = stitch_lines(detections)
-            items_texts.append("\n".join(stitched_lines))
-
-        charges_data = await charges_image.read()
-        asset_id = _upload_asset(charges_data, "Charges Image")
-
-        inputs = {"image": f"{asset_id}", "render_label": False}
-        asset_list = f"{asset_id}"
-
-        headers = {
-            "Content-Type": "application/json",
-            "NVCF-INPUT-ASSET-REFERENCES": asset_list,
-            "NVCF-FUNCTION-ASSET-IDS": asset_list,
-            "Authorization": HEADER_AUTH,
-        }
-
-        response = requests.post(NVAI_URL, headers=headers, json=inputs, timeout=60)
-        response.raise_for_status()
-
-        metadata = await _process_ocr_response(response)
-        detections = metadata.get("metadata", metadata.get("detections", metadata.get("data", []))) if isinstance(metadata, dict) else metadata
-        stitched_lines = stitch_lines(detections)
-        charges_text = "\n".join(stitched_lines)
-
-        full_items_text = "\n\n".join(items_texts)
-        full_text = f"ITEMS:\n{full_items_text}\n\nCHARGES:\n{charges_text}"
-
-        llm_result = None
-        if run_llm and full_items_text.strip():
-            llm_result = await reason_with_llm(
-                f"{PROMPT_ITEMS}\n{full_items_text}",
-                temperature=llm_temperature,
-                max_tokens=llm_max_tokens
-            )
-
-        charges_llm_result = None
-        if run_llm and charges_text.strip():
-            charges_llm_result = await reason_with_llm(
-                f"{PROMPT_CHARGES}\n{charges_text}",
-                temperature=llm_temperature,
-                max_tokens=llm_max_tokens
-            )
-
-        response_body = {
-            "success": True,
-            "full_text": full_text,
-            "items_text": full_items_text,
-            "charges_text": charges_text,
-        }
-
-        if llm_result is not None:
-            response_body["items_analysis"] = {
-                "response": llm_result["response"]
-            }
-
-        if charges_llm_result is not None:
-            response_body["charges_analysis"] = {
-                "response": charges_llm_result["response"]
-            }
-
-        return JSONResponse(response_body)
-
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Nvidia API request failed: {str(e)}"
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"OCR processing failed: {str(e)}"
-        )
+    return {
+        "total_items_processed": len(all_results),
+        # "cards": all_results,
+        "items_analysis": response_json,
+        "charges_analysis": response2_json
+    }
 
 
-@app.post("/nvidia-ocr/reason")
-async def llm_reasoning(
-    prompt: str,
-    temperature: float = 0.6,
-    max_tokens: int = 4096
-):
-    """
-    Send a prompt to Nvidia Nemotron Nano 9B v2 with chain-of-thought.
+from paddleocr import PaddleOCR
+import cv2
+import numpy as np
 
-    :param prompt: The prompt/question to analyze
-    :param temperature: Model temperature (0.0-2.0), default 0.6
-    :param max_tokens: Maximum tokens to generate, default 4096
-    :return: JSON with reasoning process and final response
-    """
-    result = await reason_with_llm(
-        prompt,
-        temperature=temperature,
-        max_tokens=max_tokens
-    )
-    return JSONResponse(result)
+# Initialize once globally (important)
+ocr_engine = PaddleOCR(use_angle_cls=True, lang='en')
 
+def preprocess_for_ocr(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-@app.get("/")
-async def root():
-    return {"message": "Kvitta Nvidia OCR API is running"}
+    # Increase contrast
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    gray = clahe.apply(gray)
+
+    # Mild sharpening
+    kernel = np.array([[0,-1,0], [-1,5,-1], [0,-1,0]])
+    sharp = cv2.filter2D(gray, -1, kernel)
+
+    return sharp
+
+def run_ocr_on_crop(img):
+    text = pytesseract.image_to_string(img, config="--psm 6")
+    return text.strip()
