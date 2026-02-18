@@ -4,7 +4,7 @@ from app.models.ledger import LedgerStatus
 from app.schemas.settlement import SettlementCreate
 from bson import ObjectId
 from fastapi import HTTPException
-from datetime import datetime
+from datetime import datetime, timezone
 
 class SettlementService:
     @staticmethod
@@ -47,7 +47,7 @@ class SettlementService:
                         # Full settlement of this entry
                         await db.ledger_entries.update_one(
                             {"_id": entry_id},
-                            {"$set": {"status": LedgerStatus.SETTLED, "settled_at": datetime.utcnow()}},
+                            {"$set": {"status": LedgerStatus.SETTLED, "settled_at": datetime.now(timezone.utc)}},
                             session=session
                         )
                         remaining_amount -= entry_amount
