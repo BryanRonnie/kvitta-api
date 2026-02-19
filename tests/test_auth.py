@@ -1,253 +1,318 @@
-"""
-Test authentication endpoints
-"""
+"""Tests for authentication endpoints."""
 import pytest
-from httpx import AsyncClient, ASGITransport
-from unittest.mock import AsyncMock, patch, MagicMock
-from app.main import app
+import json
+from fastapi import status
+from app.core.auth import create_access_token
 from bson import ObjectId
-from datetime import datetime, timezone
 
 
-@pytest.fixture
-def mock_database():
-    """Mock MongoDB database for tests"""
-    mock_db = MagicMock()
+class TestAuthEndpoints:
+    """Test authentication endpoints."""
     
-    # Mock users collection
-    mock_users = MagicMock()
-    mock_users.find_one = AsyncMock()
-    mock_users.insert_one = AsyncMock()
-    mock_users.update_one = AsyncMock()
-    mock_db.users = mock_users
-    
-    return mock_db
-
-
-@pytest.mark.asyncio
-async def test_signup(mock_database):
-    """Test user signup"""
-    # Setup mock database
-    mock_database.users.find_one.return_value = None  # No existing user
-    mock_result = MagicMock()
-    mock_result.inserted_id = ObjectId("507f1f77bcf86cd799439011")
-    mock_database.users.insert_one.return_value = mock_result
-    
-    with patch("app.api.v1.endpoints.auth.get_database", return_value=mock_database):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            response = await client.post(
-                "/api/v1/auth/signup",
-                json={
-                    "name": "Test User",
-                    "email": "test@example.com",
-                    "password": "testpassword123"
-                }
-            )
-            assert response.status_code == 201
-            data = response.json()
-            assert "access_token" in data
-            assert data["token_type"] == "bearer"
-            assert data["user"]["email"] == "test@example.com"
-
-
-@pytest.mark.asyncio
-async def test_signup_duplicate_email(mock_database):
-    """Test signup with duplicate email"""
-    # Mock existing user
-    existing_user = {
-        "_id": ObjectId(),
-        "email": "duplicate@example.com",
-        "name": "Existing",
-        "hashed_password": "hash"
-    }
-    
-    with patch("app.api.v1.endpoints.auth.get_database", return_value=mock_database):
-        # First call returns existing user
-        mock_database.users.find_one.return_value = existing_user
+    def test_health_endpoint(self, test_client):
+        """Test health check endpoint."""
+        response = test_client.get("/health")
         
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            response = await client.post(
-                "/api/v1/auth/signup",
-                json={
-                    "name": "User Two",
-                    "email": "duplicate@example.com",
-                    "password": "password456"
-                }
-            )
-            assert response.status_code == 400
-            assert "already registered" in response.json()["detail"].lower()
-
-
-@pytest.mark.asyncio
-async def test_login(mock_database):
-    """Test user login"""
-    # Mock existing user with hashed password
-    from passlib.context import CryptContext
-    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-    hashed_password = pwd_context.hash("loginpass123")
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["status"] == "ok"
+        assert "version" in data
     
-    existing_user = {
-        "_id": ObjectId("507f1f77bcf86cd799439011"),
-        "email": "login@example.com",
-        "name": "Login Test",
-        "hashed_password": hashed_password,
-        "is_deleted": False
-    }
-    
-    with patch("app.api.v1.endpoints.auth.get_database", return_value=mock_database):
-        mock_database.users.find_one.return_value = existing_user
+    def test_signup_success(self, test_client, sample_user_data):
+        """Test successful user signup."""
+        response = test_client.post(
+            "/auth/signup",
+            json=sample_user_data
+        )
         
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            response = await client.post(
-                "/api/v1/auth/login",
-                json={
-                    "email": "login@example.com",
-                    "password": "loginpass123"
-                }
-            )
-            assert response.status_code == 200
-            data = response.json()
-            assert "access_token" in data
-            assert data["user"]["email"] == "login@example.com"
-
-
-@pytest.mark.asyncio
-async def test_login_wrong_password(mock_database):
-    """Test login with wrong password"""
-    from passlib.context import CryptContext
-    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-    hashed_password = pwd_context.hash("correctpass123")
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert "access_token" in data
+        assert data["token_type"] == "bearer"
+        assert "user" in data
+        assert data["user"]["name"] == sample_user_data["name"]
+        assert data["user"]["email"] == sample_user_data["email"]
+        assert "id" in data["user"]
     
-    existing_user = {
-        "_id": ObjectId(),
-        "email": "wrongpass@example.com",
-        "name": "Wrong Pass Test",
-        "hashed_password": hashed_password,
-        "is_deleted": False
-    }
-    
-    with patch("app.api.v1.endpoints.auth.get_database", return_value=mock_database):
-        mock_database.users.find_one.return_value = existing_user
+    def test_signup_duplicate_email(self, test_client, created_user):
+        """Test signup with duplicate email."""
+        response = test_client.post(
+            "/auth/signup",
+            json={
+                "name": "Another User",
+                "email": created_user.email,
+                "password": "AnotherPass123"
+            }
+        )
         
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            response = await client.post(
-                "/api/v1/auth/login",
-                json={
-                    "email": "wrongpass@example.com",
-                    "password": "wrongpassword"
-                }
-            )
-            assert response.status_code == 401
-
-
-@pytest.mark.asyncio
-async def test_get_current_user(mock_database):
-    """Test getting current user info"""
-    user_id = ObjectId("507f1f77bcf86cd799439011")
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert "already registered" in response.json()["detail"]
     
-    # Mock for signup
-    mock_result = MagicMock()
-    mock_result.inserted_id = user_id
-    
-    # Mock for get current user
-    user_doc = {
-        "_id": user_id,
-        "email": "currentuser@example.com",
-        "name": "Current User Test",
-        "hashed_password": "hash",
-        "is_deleted": False,
-        "created_at": datetime.now(timezone.utc),
-        "updated_at": datetime.now(timezone.utc)
-    }
-    
-    with patch("app.api.v1.endpoints.auth.get_database", return_value=mock_database):
-        # Setup mocks for signup
-        mock_database.users.find_one.return_value = None
-        mock_database.users.insert_one.return_value = mock_result
+    def test_signup_invalid_email(self, test_client):
+        """Test signup with invalid email format."""
+        response = test_client.post(
+            "/auth/signup",
+            json={
+                "name": "Test User",
+                "email": "invalid-email",
+                "password": "SecurePass123"
+            }
+        )
         
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            # Signup to get token
-            signup_response = await client.post(
-                "/api/v1/auth/signup",
-                json={
-                    "name": "Current User Test",
-                    "email": "currentuser@example.com",
-                    "password": "password123"
-                }
-            )
-            token = signup_response.json()["access_token"]
-            
-            # Setup mock for get current user
-            mock_database.users.find_one.return_value = user_doc
-            response = await client.get(
-                "/api/v1/auth/me",
-                headers={"Authorization": f"Bearer {token}"}
-            )
-            assert response.status_code == 200
-            data = response.json()
-            assert data["email"] == "currentuser@example.com"
-            assert data["name"] == "Current User Test"
-
-
-@pytest.mark.asyncio
-async def test_unauthorized_access():
-    """Test accessing protected endpoint without token"""
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/v1/auth/me")
-        assert response.status_code == 401  # No Authorization header
-
-
-@pytest.mark.asyncio
-async def test_change_password(mock_database):
-    """Test changing password"""
-    from passlib.context import CryptContext
-    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
     
-    user_id = ObjectId("507f1f77bcf86cd799439011")
-    old_hashed = pwd_context.hash("oldpassword123")
-    
-    # Mock for signup
-    mock_result = MagicMock()
-    mock_result.inserted_id = user_id
-    
-    user_doc = {
-        "_id": user_id,
-        "email": "changepass@example.com",
-        "name": "Change Pass Test",
-        "hashed_password": old_hashed,
-        "is_deleted": False,
-        "created_at": datetime.now(timezone.utc),
-        "updated_at": datetime.now(timezone.utc)
-    }
-    
-    mock_update_result = AsyncMock()
-    
-    with patch("app.api.v1.endpoints.auth.get_database", return_value=mock_database):
-        # Setup mocks for signup
-        mock_database.users.find_one.return_value = None
-        mock_database.users.insert_one.return_value = mock_result
-        mock_database.users.update_one.return_value = mock_update_result
+    def test_signup_short_password(self, test_client):
+        """Test signup with password too short."""
+        response = test_client.post(
+            "/auth/signup",
+            json={
+                "name": "Test User",
+                "email": "test@example.com",
+                "password": "short"
+            }
+        )
         
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            # Signup
-            signup_response = await client.post(
-                "/api/v1/auth/signup",
-                json={
-                    "name": "Change Pass Test",
-                    "email": "changepass@example.com",
-                    "password": "oldpassword123"
-                }
-            )
-            token = signup_response.json()["access_token"]
-            
-            # Change password - setup mock to return user with old password
-            mock_database.users.find_one.return_value = user_doc
-            response = await client.post(
-                "/api/v1/auth/change-password",
-                headers={"Authorization": f"Bearer {token}"},
-                json={
-                    "current_password": "oldpassword123",
-                    "new_password": "newpassword123"
-                }
-            )
-            assert response.status_code == 200
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    
+    def test_signup_empty_name(self, test_client):
+        """Test signup with empty name."""
+        response = test_client.post(
+            "/auth/signup",
+            json={
+                "name": "",
+                "email": "test@example.com",
+                "password": "SecurePass123"
+            }
+        )
+        
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    
+    def test_signup_missing_field(self, test_client):
+        """Test signup with missing required field."""
+        response = test_client.post(
+            "/auth/signup",
+            json={
+                "name": "Test User",
+                "email": "test@example.com"
+                # Missing password
+            }
+        )
+        
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    
+    def test_login_success(self, test_client, created_user, sample_user_data):
+        """Test successful login."""
+        response = test_client.post(
+            "/auth/login",
+            data={
+                "email": sample_user_data["email"],
+                "password": sample_user_data["password"]
+            }
+        )
+        
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert "access_token" in data
+        assert data["token_type"] == "bearer"
+        assert data["user"]["email"] == sample_user_data["email"]
+    
+    def test_login_invalid_email(self, test_client):
+        """Test login with non-existent email."""
+        response = test_client.post(
+            "/auth/login",
+            data={
+                "email": "nonexistent@example.com",
+                "password": "AnyPassword123"
+            }
+        )
+        
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+        assert "Invalid email or password" in response.json()["detail"]
+    
+    def test_login_wrong_password(self, test_client, created_user, sample_user_data):
+        """Test login with wrong password."""
+        response = test_client.post(
+            "/auth/login",
+            data={
+                "email": sample_user_data["email"],
+                "password": "WrongPassword123"
+            }
+        )
+        
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+        assert "Invalid email or password" in response.json()["detail"]
+    
+    def test_login_empty_password(self, test_client, created_user, sample_user_data):
+        """Test login with empty password - validation should reject it."""
+        response = test_client.post(
+            "/auth/login",
+            data={
+                "email": sample_user_data["email"],
+                "password": ""
+            }
+        )
+        
+        # FastAPI validates required form fields, returns 422 for empty password
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+
+    def test_login_missing_email(self, test_client):
+        """Test login with missing email."""
+        response = test_client.post(
+            "/auth/login",
+            data={
+                "password": "AnyPassword123"
+            }
+        )
+        
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    
+    def test_get_me_with_valid_token(self, test_client, created_user, valid_token):
+        """Test getting current user with valid token."""
+        response = test_client.get(
+            "/auth/me",
+            headers={"Authorization": f"Bearer {valid_token}"}
+        )
+        
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["name"] == created_user.name
+        assert data["email"] == created_user.email
+        assert "created_at" in data
+        assert "updated_at" in data
+    
+    def test_get_me_without_token(self, test_client):
+        """Test getting current user without token."""
+        response = test_client.get("/auth/me")
+        
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+    
+    def test_get_me_with_invalid_token(self, test_client):
+        """Test getting current user with invalid token."""
+        response = test_client.get(
+            "/auth/me",
+            headers={"Authorization": "Bearer invalid_token"}
+        )
+        
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+    
+    def test_get_me_with_expired_token(self, test_client):
+        """Test getting current user with expired token."""
+        from datetime import timedelta
+        from app.core.auth import create_access_token
+        
+        # Create a token that expired in the past
+        expired_token = create_access_token(
+            str(ObjectId()),
+            expires_delta=timedelta(seconds=-1)
+        )
+        
+        response = test_client.get(
+            "/auth/me",
+            headers={"Authorization": f"Bearer {expired_token}"}
+        )
+        
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+    
+    def test_get_me_with_malformed_header(self, test_client):
+        """Test getting current user with malformed auth header."""
+        # Missing Bearer prefix
+        response = test_client.get(
+            "/auth/me",
+            headers={"Authorization": "invalid_token"}
+        )
+        
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+    
+    @pytest.mark.asyncio
+    async def test_get_me_token_for_deleted_user(self, test_client, created_user, valid_token, test_db):
+        """Test accessing /auth/me with token for deleted user."""
+        # Delete the user
+        await test_db["users"].update_one(
+            {"_id": created_user._id},
+            {"$set": {"is_deleted": True}}
+        )
+        
+        response = test_client.get(
+            "/auth/me",
+            headers={"Authorization": f"Bearer {valid_token}"}
+        )
+        
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+
+class TestAuthIntegration:
+    """Integration tests for auth flow."""
+    
+    def test_signup_and_login_flow(self, test_client):
+        """Test complete signup and login flow."""
+        # Signup
+        signup_data = {
+            "name": "Integration Test User",
+            "email": "integration@example.com",
+            "password": "IntegrationPass123"
+        }
+        
+        signup_response = test_client.post("/auth/signup", json=signup_data)
+        assert signup_response.status_code == status.HTTP_200_OK
+        signup_token = signup_response.json()["access_token"]
+        
+        # Get user with signup token
+        me_response = test_client.get(
+            "/auth/me",
+            headers={"Authorization": f"Bearer {signup_token}"}
+        )
+        assert me_response.status_code == status.HTTP_200_OK
+        assert me_response.json()["name"] == signup_data["name"]
+        
+        # Login with credentials
+        login_response = test_client.post(
+            "/auth/login",
+            data={
+                "email": signup_data["email"],
+                "password": signup_data["password"]
+            }
+        )
+        assert login_response.status_code == status.HTTP_200_OK
+        login_token = login_response.json()["access_token"]
+        
+        # Get user with login token
+        me_response2 = test_client.get(
+            "/auth/me",
+            headers={"Authorization": f"Bearer {login_token}"}
+        )
+        assert me_response2.status_code == status.HTTP_200_OK
+        assert me_response2.json()["email"] == signup_data["email"]
+    
+    def test_multiple_users_isolation(self, test_client):
+        """Test that different users can login independently."""
+        # Create user 1
+        user1_data = {
+            "name": "User One",
+            "email": "user1@example.com",
+            "password": "User1Pass123"
+        }
+        user1_signup = test_client.post("/auth/signup", json=user1_data)
+        user1_token = user1_signup.json()["access_token"]
+        
+        # Create user 2
+        user2_data = {
+            "name": "User Two",
+            "email": "user2@example.com",
+            "password": "User2Pass123"
+        }
+        user2_signup = test_client.post("/auth/signup", json=user2_data)
+        user2_token = user2_signup.json()["access_token"]
+        
+        # User 1 should only see their own data
+        user1_me = test_client.get(
+            "/auth/me",
+            headers={"Authorization": f"Bearer {user1_token}"}
+        ).json()
+        assert user1_me["email"] == user1_data["email"]
+        
+        # User 2 should only see their own data
+        user2_me = test_client.get(
+            "/auth/me",
+            headers={"Authorization": f"Bearer {user2_token}"}
+        ).json()
+        assert user2_me["email"] == user2_data["email"]
