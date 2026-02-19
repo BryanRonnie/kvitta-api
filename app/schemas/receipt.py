@@ -33,6 +33,7 @@ class PaymentBase(BaseModel):
 class ReceiptBase(BaseModel):
     title: str
     description: Optional[str] = None
+    comments: Optional[str] = None
     folder_id: Optional[str] = None
     
     model_config = {"from_attributes": True}
@@ -42,12 +43,16 @@ class ReceiptCreate(ReceiptBase):
     pass
 
 class ReceiptUpdate(BaseModel):
-    """For future commits - update items/payments"""
+    """Update receipt - only works on draft status. All fields optional for autosave."""
     title: Optional[str] = None
-    status: Optional[ReceiptStatus] = None
-    participants: Optional[List[ParticipantBase]] = None
+    description: Optional[str] = None
+    comments: Optional[str] = None
+    folder_id: Optional[str] = None
     items: Optional[List[ItemBase]] = None
     payments: Optional[List[PaymentBase]] = None
+    tax_cents: Optional[int] = None
+    tip_cents: Optional[int] = None
+    version: int  # Required for optimistic locking
 
 class ItemResponse(ItemBase):
     item_id: str

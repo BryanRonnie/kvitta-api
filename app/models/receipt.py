@@ -35,6 +35,7 @@ class Receipt(MongoModel):
     folder_id: Optional[PyObjectId] = None
     title: str
     description: Optional[str] = None
+    comments: Optional[str] = None  # For clarifications and discussions
     status: ReceiptStatus = ReceiptStatus.DRAFT
     
     participants: List[Participant] = []

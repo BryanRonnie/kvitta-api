@@ -19,7 +19,7 @@ class UserUpdate(BaseModel):
 
 class UserResponse(UserBase):
     """User response schema."""
-    id: str = Field(alias="_id")
+    id: str = Field(validation_alias="_id", serialization_alias="id")
     created_at: datetime
     updated_at: datetime
     
