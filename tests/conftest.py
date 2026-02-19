@@ -4,7 +4,7 @@ import pytest_asyncio
 from fastapi.testclient import TestClient
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from main import app
-from app import db as db_module
+from app.db.mongo import mongodb as app_mongodb
 from app.models.user import UserCreate
 from app.repositories.user_repo import UserRepository
 from app.core.auth import create_access_token
@@ -44,20 +44,21 @@ def test_client(monkeypatch):
     from app.core import config
     config.settings.MONGODB_DB = TEST_MONGODB_DB
     
-    # Clean up test database before test (sync blocking call)
-    def setup_cleanup():
+    async def _drop_test_db():
         client = AsyncIOMotorClient(TEST_MONGODB_URI)
-        # Create a new event loop for this cleanup
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(client.drop_database(TEST_MONGODB_DB))
+            await client.drop_database(TEST_MONGODB_DB)
         finally:
-            loop.run_until_complete(asyncio.sleep(0))  # Let pending tasks complete
             client.close()
-            loop.close()
-    
-    setup_cleanup()
+
+    def _reset_app_mongo():
+        if app_mongodb.client:
+            app_mongodb.client.close()
+        app_mongodb.client = None
+        app_mongodb.db = None
+
+    _reset_app_mongo()
+    asyncio.run(_drop_test_db())
     
     # Use TestClient with context manager to trigger lifespan
     # This will create MongoDB connection using TEST_MONGODB_DB
@@ -65,7 +66,8 @@ def test_client(monkeypatch):
         yield client
     
     # Cleanup after test
-    setup_cleanup()
+    _reset_app_mongo()
+    asyncio.run(_drop_test_db())
 
 
 @pytest_asyncio.fixture
