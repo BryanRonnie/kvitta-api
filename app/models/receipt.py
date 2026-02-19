@@ -1,5 +1,5 @@
 from typing import Optional, List
-from pydantic import Field
+from pydantic import Field, BaseModel
 from app.models.base import MongoModel, PyObjectId
 from datetime import datetime, timezone
 from enum import Enum
@@ -9,24 +9,26 @@ class ReceiptStatus(str, Enum):
     FINALIZED = "finalized"
     SETTLED = "settled"
 
-class Participant(MongoModel):
+# Embedded documents don't need MongoModel (no separate _id)
+class Participant(BaseModel):
     user_id: PyObjectId
+    role: str = "member"  # "owner" or "member"
     joined_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-class Split(MongoModel):
+class Split(BaseModel):
     user_id: PyObjectId
-    share_quantity: float
+    share_quantity: float  # e.g., 0.5 for half
 
-class Item(MongoModel):
+class Item(BaseModel):
     item_id: PyObjectId = Field(default_factory=PyObjectId)
     name: str
-    unit_price: float
-    quantity: float
+    unit_price_cents: int  # Integer cents
+    quantity: float  # e.g., 2.5 for 2.5 units
     splits: List[Split] = []
 
-class Payment(MongoModel):
+class Payment(BaseModel):
     user_id: PyObjectId
-    amount_paid: float
+    amount_paid_cents: int  # Integer cents
 
 class Receipt(MongoModel):
     owner_id: PyObjectId
@@ -39,10 +41,11 @@ class Receipt(MongoModel):
     items: List[Item] = []
     payments: List[Payment] = []
     
-    subtotal: float = 0.0
-    tax: float = 0.0
-    tip: float = 0.0
-    total: float = 0.0
+    # All monetary values in integer cents
+    subtotal_cents: int = 0
+    tax_cents: int = 0
+    tip_cents: int = 0
+    total_cents: int = 0
     
     version: int = 1
     

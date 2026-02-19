@@ -2,6 +2,7 @@ from typing import Optional, List
 from pydantic import BaseModel, Field
 from datetime import datetime
 from app.models.receipt import ReceiptStatus
+from app.models.base import PyObjectId
 
 class SplitBase(BaseModel):
     user_id: str
@@ -11,7 +12,7 @@ class SplitBase(BaseModel):
 
 class ItemBase(BaseModel):
     name: str
-    unit_price: float
+    unit_price_cents: int  # Integer cents
     quantity: float
     splits: List[SplitBase] = []
     
@@ -19,12 +20,13 @@ class ItemBase(BaseModel):
 
 class ParticipantBase(BaseModel):
     user_id: str
+    role: str = "member"
     
     model_config = {"from_attributes": True}
 
 class PaymentBase(BaseModel):
     user_id: str
-    amount_paid: float
+    amount_paid_cents: int  # Integer cents
     
     model_config = {"from_attributes": True}
 
@@ -36,11 +38,11 @@ class ReceiptBase(BaseModel):
     model_config = {"from_attributes": True}
 
 class ReceiptCreate(ReceiptBase):
-    participants: List[ParticipantBase] = []
-    items: List[ItemBase] = []
-    payments: List[PaymentBase] = []
+    """For Commit 6: Draft only creation - no items/payments yet"""
+    pass
 
 class ReceiptUpdate(BaseModel):
+    """For future commits - update items/payments"""
     title: Optional[str] = None
     status: Optional[ReceiptStatus] = None
     participants: Optional[List[ParticipantBase]] = None
@@ -53,16 +55,14 @@ class ItemResponse(ItemBase):
 class ParticipantResponse(ParticipantBase):
     joined_at: datetime
 
-from app.models.base import PyObjectId
-
 class ReceiptResponse(ReceiptBase):
-    id: PyObjectId = Field(validation_alias="_id") # Read from _id, write as id
-    owner_id: PyObjectId
+    id: str = Field(validation_alias="_id", serialization_alias="id")
+    owner_id: str
     status: ReceiptStatus
-    subtotal: float
-    tax: float
-    tip: float
-    total: float
+    subtotal_cents: int
+    tax_cents: int
+    tip_cents: int
+    total_cents: int
     version: int
     created_at: datetime
     updated_at: datetime
