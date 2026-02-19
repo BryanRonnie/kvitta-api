@@ -59,7 +59,7 @@ async def test_update_receipt_increments_version(seeded_users, patched_db):
     receipt_in = ReceiptCreate(title="Original")
     receipt = await ReceiptService.create(receipt_in, str(owner_id))
 
-    update = ReceiptUpdate(title="Updated")
+    update = ReceiptUpdate(title="Updated", version=receipt.version)
     updated = await ReceiptService.update(str(receipt.id), update, str(owner_id))
 
     assert updated is not None
@@ -79,7 +79,7 @@ async def test_update_receipt_finalized_raises(seeded_users, patched_db):
     )
 
     with pytest.raises(HTTPException) as exc:
-        await ReceiptService.update(str(receipt.id), ReceiptUpdate(title="Nope"), str(owner_id))
+        await ReceiptService.update(str(receipt.id), ReceiptUpdate(title="Nope", version=receipt.version), str(owner_id))
 
     assert exc.value.status_code == 400
 
