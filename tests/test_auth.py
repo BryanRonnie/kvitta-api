@@ -25,7 +25,7 @@ class TestAuthEndpoints:
             json=sample_user_data
         )
         
-        assert response.status_code == status.HTTP_200_OK
+        assert response.status_code == status.HTTP_201_CREATED
         data = response.json()
         assert "access_token" in data
         assert data["token_type"] == "bearer"
@@ -253,7 +253,7 @@ class TestAuthIntegration:
         }
         
         signup_response = test_client.post("/auth/signup", json=signup_data)
-        assert signup_response.status_code == status.HTTP_200_OK
+        assert signup_response.status_code == status.HTTP_201_CREATED
         signup_token = signup_response.json()["access_token"]
         
         # Get user with signup token

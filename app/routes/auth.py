@@ -7,7 +7,7 @@ from app.core.security import verify_password
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-@router.post("/signup", response_model=dict)
+@router.post("/signup", response_model=dict, status_code=status.HTTP_201_CREATED)
 async def signup(user_data: UserCreate, db = Depends(get_db)):
     """Create a new user account."""
     user_repo = UserRepository(db)

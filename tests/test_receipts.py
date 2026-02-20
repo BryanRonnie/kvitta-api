@@ -396,3 +396,304 @@ def test_autosave_update_tax_tip_only(test_client, valid_token):
     assert data["tip_cents"] == 2000
     assert data["total_cents"] == 2850  # 0 + 850 + 2000
     assert data["version"] == 2
+
+
+# ============ MEMBER MANAGEMENT TESTS ============
+
+def test_add_member_by_email(test_client, valid_token):
+    """Test adding a member to receipt by email."""
+    # Create receipt
+    create_response = test_client.post(
+        "/receipts",
+        headers={"Authorization": f"Bearer {valid_token}"},
+        json={"title": "Group Dinner"}
+    )
+    receipt_id = create_response.json()["id"]
+    initial_members = len(create_response.json()["participants"])
+    
+    # Create another user
+    signup_response = test_client.post(
+        "/auth/signup",
+        json={
+            "name": "Alice",
+            "email": "alice@example.com",
+            "password": "password123"
+        }
+    )
+    assert signup_response.status_code == status.HTTP_201_CREATED
+    
+    # Add member by email
+    add_response = test_client.post(
+        f"/receipts/{receipt_id}/members",
+        headers={"Authorization": f"Bearer {valid_token}"},
+        json={"email": "alice@example.com"}
+    )
+    
+    assert add_response.status_code == status.HTTP_201_CREATED
+    data = add_response.json()
+    assert len(data["participants"]) == initial_members + 1
+    
+    # Verify new member is in list
+    member_emails = {p["user_id"] for p in data["participants"]}
+    assert len(member_emails) == initial_members + 1
+
+
+def test_add_member_duplicate(test_client, valid_token):
+    """Test cannot add same member twice."""
+    create_response = test_client.post(
+        "/receipts",
+        headers={"Authorization": f"Bearer {valid_token}"},
+        json={"title": "Test"}
+    )
+    receipt_id = create_response.json()["id"]
+    
+    # Create user
+    test_client.post(
+        "/auth/signup",
+        json={
+            "name": "Bob",
+            "email": "bob@example.com",
+            "password": "password123"
+        }
+    )
+    
+    # Add member first time
+    test_client.post(
+        f"/receipts/{receipt_id}/members",
+        headers={"Authorization": f"Bearer {valid_token}"},
+        json={"email": "bob@example.com"}
+    )
+    
+    # Try to add same member again
+    duplicate_response = test_client.post(
+        f"/receipts/{receipt_id}/members",
+        headers={"Authorization": f"Bearer {valid_token}"},
+        json={"email": "bob@example.com"}
+    )
+    
+    assert duplicate_response.status_code == status.HTTP_400_BAD_REQUEST
+    assert "already exists" in duplicate_response.json()["detail"].lower()
+
+
+def test_add_member_nonexistent_email(test_client, valid_token):
+    """Test adding member with non-existent email fails."""
+    create_response = test_client.post(
+        "/receipts",
+        headers={"Authorization": f"Bearer {valid_token}"},
+        json={"title": "Test"}
+    )
+    receipt_id = create_response.json()["id"]
+    
+    response = test_client.post(
+        f"/receipts/{receipt_id}/members",
+        headers={"Authorization": f"Bearer {valid_token}"},
+        json={"email": "nonexistent@example.com"}
+    )
+    
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert "not found" in response.json()["detail"].lower()
+
+
+def test_add_member_not_owner(test_client, valid_token):
+    """Test non-owner cannot add members."""
+    # Owner creates receipt
+    create_response = test_client.post(
+        "/receipts",
+        headers={"Authorization": f"Bearer {valid_token}"},
+        json={"title": "Test"}
+    )
+    receipt_id = create_response.json()["id"]
+    
+    # Create another user
+    signup_response = test_client.post(
+        "/auth/signup",
+        json={
+            "name": "Charlie",
+            "email": "charlie@example.com",
+            "password": "password123"
+        }
+    )
+    
+    # Add them as participant
+    test_client.post(
+        f"/receipts/{receipt_id}/members",
+        headers={"Authorization": f"Bearer {valid_token}"},
+        json={"email": "charlie@example.com"}
+    )
+    
+    # Login as Charlie and try to add another member
+    charlie_login = test_client.post(
+        "/auth/login",
+        data={"email": "charlie@example.com", "password": "password123"}
+    )
+    charlie_token = charlie_login.json()["access_token"]
+    
+    # Create another user
+    test_client.post(
+        "/auth/signup",
+        json={
+            "name": "Dave",
+            "email": "dave@example.com",
+            "password": "password123"
+        }
+    )
+    
+    # Try to add member as non-owner
+    response = test_client.post(
+        f"/receipts/{receipt_id}/members",
+        headers={"Authorization": f"Bearer {charlie_token}"},
+        json={"email": "dave@example.com"}
+    )
+    
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+
+
+def test_get_members(test_client, valid_token):
+    """Test listing receipt members."""
+    # Create receipt
+    create_response = test_client.post(
+        "/receipts",
+        headers={"Authorization": f"Bearer {valid_token}"},
+        json={"title": "Potluck"}
+    )
+    receipt_id = create_response.json()["id"]
+    
+    # Create and add member
+    test_client.post(
+        "/auth/signup",
+        json={
+            "name": "Eve",
+            "email": "eve@example.com",
+            "password": "password123"
+        }
+    )
+    
+    test_client.post(
+        f"/receipts/{receipt_id}/members",
+        headers={"Authorization": f"Bearer {valid_token}"},
+        json={"email": "eve@example.com"}
+    )
+    
+    # Get members
+    response = test_client.get(
+        f"/receipts/{receipt_id}/members",
+        headers={"Authorization": f"Bearer {valid_token}"}
+    )
+    
+    assert response.status_code == status.HTTP_200_OK
+    members = response.json()
+    assert len(members) == 2  # Owner + Eve
+    
+    # Check roles
+    roles = {m["role"] for m in members}
+    assert "owner" in roles
+    assert "member" in roles
+
+
+def test_remove_member(test_client, valid_token):
+    """Test removing a member."""
+    # Create receipt
+    create_response = test_client.post(
+        "/receipts",
+        headers={"Authorization": f"Bearer {valid_token}"},
+        json={"title": "Test"}
+    )
+    receipt_id = create_response.json()["id"]
+    
+    # Create and add member
+    signup_response = test_client.post(
+        "/auth/signup",
+        json={
+            "name": "Frank",
+            "email": "frank@example.com",
+            "password": "password123"
+        }
+    )
+    frank_id = signup_response.json()["user"]["id"]
+    
+    test_client.post(
+        f"/receipts/{receipt_id}/members",
+        headers={"Authorization": f"Bearer {valid_token}"},
+        json={"email": "frank@example.com"}
+    )
+    
+    # Remove member
+    response = test_client.delete(
+        f"/receipts/{receipt_id}/members/{frank_id}",
+        headers={"Authorization": f"Bearer {valid_token}"}
+    )
+    
+    assert response.status_code == status.HTTP_200_OK
+    
+    # Verify removed
+    members_response = test_client.get(
+        f"/receipts/{receipt_id}/members",
+        headers={"Authorization": f"Bearer {valid_token}"}
+    )
+    members = members_response.json()
+    assert len(members) == 1  # Only owner
+
+
+def test_remove_member_with_splits_fails(test_client, valid_token):
+    """Test cannot remove member if they have splits."""
+    # Create receipt
+    create_response = test_client.post(
+        "/receipts",
+        headers={"Authorization": f"Bearer {valid_token}"},
+        json={"title": "Test"}
+    )
+    receipt_id = create_response.json()["id"]
+    version = create_response.json()["version"]
+    
+    # Get user ID
+    me_response = test_client.get(
+        "/auth/me",
+        headers={"Authorization": f"Bearer {valid_token}"}
+    )
+    user_id = me_response.json()["id"]
+    
+    # Create and add member
+    signup_response = test_client.post(
+        "/auth/signup",
+        json={
+            "name": "Grace",
+            "email": "grace@example.com",
+            "password": "password123"
+        }
+    )
+    grace_id = signup_response.json()["user"]["id"]
+    
+    test_client.post(
+        f"/receipts/{receipt_id}/members",
+        headers={"Authorization": f"Bearer {valid_token}"},
+        json={"email": "grace@example.com"}
+    )
+    
+    # Add items with splits including Grace
+    test_client.patch(
+        f"/receipts/{receipt_id}",
+        headers={"Authorization": f"Bearer {valid_token}"},
+        json={
+            "version": version,
+            "items": [
+                {
+                    "name": "Pizza",
+                    "unit_price_cents": 2000,
+                    "quantity": 2,
+                    "splits": [
+                        {"user_id": user_id, "share_quantity": 1.0},
+                        {"user_id": grace_id, "share_quantity": 1.0}
+                    ]
+                }
+            ]
+        }
+    )
+    
+    # Try to remove Grace
+    response = test_client.delete(
+        f"/receipts/{receipt_id}/members/{grace_id}",
+        headers={"Authorization": f"Bearer {valid_token}"}
+    )
+    
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert "splits" in response.json()["detail"].lower()

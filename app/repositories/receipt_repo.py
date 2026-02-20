@@ -223,3 +223,93 @@ class ReceiptRepository:
         except Exception:
             return None
 
+    async def add_member(self, receipt_id: str, user_id: str) -> Optional[Receipt]:
+        """Add a member to the receipt."""
+        try:
+            user_oid = ObjectId(user_id)
+            
+            # Check if already a member
+            existing = await self.collection.find_one({
+                "_id": ObjectId(receipt_id),
+                "participants.user_id": user_oid
+            })
+            
+            if existing:
+                return None  # Already a member
+            
+            # Add member
+            result = await self.collection.find_one_and_update(
+                {"_id": ObjectId(receipt_id)},
+                {
+                    "$push": {
+                        "participants": Participant(
+                            user_id=user_oid,
+                            role="member",
+                            joined_at=datetime.now(timezone.utc)
+                        ).model_dump(mode="python")
+                    },
+                    "$set": {"updated_at": datetime.now(timezone.utc)}
+                },
+                return_document=True
+            )
+            
+            if result:
+                return Receipt(**result)
+        except Exception:
+            return None
+        return None
+
+    async def remove_member(self, receipt_id: str, user_id: str) -> Optional[Receipt]:
+        """Remove a member from the receipt."""
+        try:
+            user_oid = ObjectId(user_id)
+            
+            # Check if member has splits
+            receipt = await self.collection.find_one({"_id": ObjectId(receipt_id)})
+            if not receipt:
+                return None
+            
+            # Check splits
+            for item in receipt.get("items", []):
+                for split in item.get("splits", []):
+                    if split["user_id"] == user_oid:
+                        raise ReceiptValidationError(
+                            "Cannot remove member: has splits in items"
+                        )
+            
+            # Check payments
+            for payment in receipt.get("payments", []):
+                if payment["user_id"] == user_oid:
+                    raise ReceiptValidationError(
+                        "Cannot remove member: has recorded payments"
+                    )
+            
+            # Remove member
+            result = await self.collection.find_one_and_update(
+                {"_id": ObjectId(receipt_id)},
+                {
+                    "$pull": {"participants": {"user_id": user_oid}},
+                    "$set": {"updated_at": datetime.now(timezone.utc)}
+                },
+                return_document=True
+            )
+            
+            if result:
+                return Receipt(**result)
+        except ReceiptValidationError:
+            raise
+        except Exception:
+            return None
+        return None
+
+    async def get_members(self, receipt_id: str) -> Optional[list[Participant]]:
+        """Get all members of a receipt."""
+        try:
+            doc = await self.collection.find_one({"_id": ObjectId(receipt_id)})
+            if doc:
+                return [
+                    Participant(**p) for p in doc.get("participants", [])
+                ]
+        except Exception:
+            return None
+        return None
