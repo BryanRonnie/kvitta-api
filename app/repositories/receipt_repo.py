@@ -1,7 +1,7 @@
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Tuple, List
 
 from app.models.receipt import Receipt, Participant, Item, Split, Payment
 from app.schemas.receipt import ReceiptCreate, ReceiptUpdate
@@ -313,3 +313,67 @@ class ReceiptRepository:
         except Exception:
             return None
         return None
+
+    async def finalize_receipt(self, receipt_id: str) -> Tuple[Optional[Receipt], Optional[list]]:
+        """
+        Finalize a receipt: lock it and generate ledger entries.
+        
+        Process:
+        1. Fetch receipt and validate draft status
+        2. Validate payments sum equals total_cents
+        3. Update receipt status to "finalized"
+        4. Create ledger entries via LedgerRepository
+        
+        Returns: (receipt, ledger_entries) or (None, None) if failed
+        Raises ReceiptValidationError if validation fails
+        """
+        try:
+            receipt_oid = ObjectId(receipt_id)
+        except:
+            raise ReceiptValidationError("Invalid receipt ID")
+        
+        # Fetch receipt
+        doc = await self.collection.find_one({"_id": receipt_oid})
+        if not doc:
+            raise ReceiptValidationError("Receipt not found")
+        
+        receipt = Receipt(**doc)
+        
+        # Validate draft status
+        if receipt.status.value != "draft":
+            raise ReceiptValidationError(
+                f"Cannot finalize receipt with status '{receipt.status.value}'. Must be 'draft'."
+            )
+        
+        # Validate payments sum equals total
+        total_paid = sum(p.amount_paid_cents for p in receipt.payments)
+        if total_paid != receipt.total_cents:
+            raise ReceiptValidationError(
+                f"Payments sum ({total_paid} cents) does not equal total ({receipt.total_cents} cents)"
+            )
+        
+        # Update receipt status to finalized
+        now = datetime.now(timezone.utc)
+        result = await self.collection.find_one_and_update(
+            {"_id": receipt_oid},
+            {
+                "$set": {
+                    "status": "finalized",
+                    "updated_at": now
+                }
+            },
+            return_document=True
+        )
+        
+        if not result:
+            raise ReceiptValidationError("Failed to finalize receipt")
+        
+        finalized_receipt = Receipt(**result)
+        
+        # Create ledger entries
+        from app.repositories.ledger_repo import LedgerRepository
+        ledger_repo = LedgerRepository(self.db)
+        ledger_entries = await ledger_repo.insert_ledger_entries(finalized_receipt)
+        
+        return finalized_receipt, ledger_entries
+

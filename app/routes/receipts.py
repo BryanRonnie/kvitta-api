@@ -6,6 +6,7 @@ from app.core.auth import get_current_user
 from app.models.user import UserResponse
 from app.schemas.receipt import ReceiptCreate, ReceiptResponse, ReceiptUpdate
 from app.schemas.member import MemberAdd, MemberResponse
+from app.schemas.finalize import ReceiptFinalizeResponse, LedgerEntryResponse
 from app.repositories.receipt_repo import ReceiptRepository
 from app.repositories.user_repo import UserRepository
 from app.utils.receipt_validation import ReceiptValidationError
@@ -372,4 +373,79 @@ async def remove_member(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
+        )
+
+
+@router.post("/{receipt_id}/finalize", response_model=ReceiptFinalizeResponse)
+async def finalize_receipt(
+    receipt_id: str,
+    current_user: UserResponse = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """
+    Finalize a receipt: lock it and generate immutable ledger entries.
+    
+    Requirements:
+    - Current user must be receipt owner
+    - Receipt must be in draft status
+    - All items must have valid splits
+    - Payments must sum to total_cents
+    
+    Returns receipt with generated ledger entries.
+    """
+    receipt_repo = ReceiptRepository(db)
+    
+    # Verify ownership
+    receipt = await receipt_repo.get_receipt(receipt_id, current_user.id)
+    if not receipt or str(receipt.owner_id) != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Receipt not found or you are not the owner"
+        )
+    
+    try:
+        # Finalize and generate ledger
+        finalized_receipt, ledger_entries = await receipt_repo.finalize_receipt(receipt_id)
+        
+        if not finalized_receipt:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to finalize receipt"
+            )
+        
+        # Build response with ledger entries
+        ledger_response = [
+            LedgerEntryResponse(
+                **{
+                    **entry.model_dump(by_alias=True),
+                    "id": str(entry.id) if entry.id else None
+                }
+            )
+            for entry in ledger_entries
+        ]
+        
+        return ReceiptFinalizeResponse(
+            **{
+                **{
+                    "id": str(finalized_receipt.id),
+                    "owner_id": str(finalized_receipt.owner_id),
+                    "title": finalized_receipt.title,
+                    "status": finalized_receipt.status.value,
+                    "total_cents": finalized_receipt.total_cents,
+                    "version": finalized_receipt.version,
+                    "updated_at": finalized_receipt.updated_at,
+                    "ledger_entries": ledger_response
+                }
+            }
+        )
+    
+    except ReceiptValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Finalization failed: {str(e)}"
         )
