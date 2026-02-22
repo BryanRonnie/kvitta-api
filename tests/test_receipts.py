@@ -697,3 +697,73 @@ def test_remove_member_with_splits_fails(test_client, valid_token):
     
     assert response.status_code == status.HTTP_400_BAD_REQUEST
     assert "splits" in response.json()["detail"].lower()
+
+def test_delete_receipt(test_client, valid_token):
+    """Test DELETE /receipts/{receipt_id} soft deletes receipt."""
+    # Create receipt
+    create_response = test_client.post(
+        "/receipts",
+        headers={"Authorization": f"Bearer {valid_token}"},
+        json={"title": "Dinner"}
+    )
+    receipt_id = create_response.json()["id"]
+
+    # Delete receipt
+    delete_response = test_client.delete(
+        f"/receipts/{receipt_id}",
+        headers={"Authorization": f"Bearer {valid_token}"}
+    )
+
+    assert delete_response.status_code == status.HTTP_200_OK
+    assert delete_response.json()["success"] is True
+
+    # Verify receipt is no longer visible (soft deleted)
+    get_response = test_client.get(
+        f"/receipts/{receipt_id}",
+        headers={"Authorization": f"Bearer {valid_token}"}
+    )
+    assert get_response.status_code == status.HTTP_404_NOT_FOUND
+
+
+def test_delete_receipt_not_owner(test_client, valid_token):
+    """Test DELETE fails if user is not owner."""
+    # Create receipt with first user
+    create_response = test_client.post(
+        "/receipts",
+        headers={"Authorization": f"Bearer {valid_token}"},
+        json={"title": "Dinner"}
+    )
+    receipt_id = create_response.json()["id"]
+
+    # Create another user
+    signup_response = test_client.post(
+        "/auth/signup",
+        json={
+            "name": "Other",
+            "email": "other@example.com",
+            "password": "password123"
+        }
+    )
+    other_token = signup_response.json()["user"]["token"]
+
+    # Try to delete with other user's token
+    delete_response = test_client.delete(
+        f"/receipts/{receipt_id}",
+        headers={"Authorization": f"Bearer {other_token}"}
+    )
+
+    assert delete_response.status_code == status.HTTP_404_NOT_FOUND
+    assert "not the owner" in delete_response.json()["detail"]
+
+
+def test_delete_receipt_not_found(test_client, valid_token):
+    """Test DELETE returns 404 for non-existent receipt."""
+    fake_id = "507f1f77bcf86cd799439011"
+
+    delete_response = test_client.delete(
+        f"/receipts/{fake_id}",
+        headers={"Authorization": f"Bearer {valid_token}"}
+    )
+
+    assert delete_response.status_code == status.HTTP_404_NOT_FOUND
+    assert "not found" in delete_response.json()["detail"]

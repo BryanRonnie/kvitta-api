@@ -3,12 +3,14 @@ from bson import ObjectId
 from datetime import datetime, timezone
 from typing import Optional, Tuple, List
 
-from app.models.receipt import Receipt, Participant, Item, Split, Payment
+from app.models.receipt import Receipt, Participant, Item, Split, Payment, Charge
 from app.schemas.receipt import ReceiptCreate, ReceiptUpdate
 from app.utils.receipt_validation import (
     validate_items,
+    validate_charges,
     validate_payments,
     calculate_subtotal,
+    calculate_charges_total,
     calculate_total,
     ReceiptValidationError
 )
@@ -41,10 +43,9 @@ class ReceiptRepository:
             "status": "draft",
             "participants": [owner_participant.model_dump(mode="python")],
             "items": [],
+            "charges": [],
             "payments": [],
             "subtotal_cents": 0,
-            "tax_cents": 0,
-            "tip_cents": 0,
             "total_cents": 0,
             "version": 1,
             "created_by": owner_oid,
@@ -148,6 +149,7 @@ class ReceiptRepository:
                         name=item.name,
                         unit_price_cents=item.unit_price_cents,
                         quantity=item.quantity,
+                        taxable=item.taxable,
                         splits=[
                             Split(
                                 user_id=ObjectId(split.user_id),
@@ -172,30 +174,39 @@ class ReceiptRepository:
                 validate_payments(payments, 0)  # Basic validation only
                 updates["payments"] = [p.model_dump(mode="python") for p in payments]
             
-            # Tax and tip
-            tax_cents = update_data.tax_cents if update_data.tax_cents is not None else existing.get("tax_cents", 0)
-            tip_cents = update_data.tip_cents if update_data.tip_cents is not None else existing.get("tip_cents", 0)
-            
-            if update_data.tax_cents is not None:
-                if update_data.tax_cents < 0:
-                    raise ReceiptValidationError("Tax cannot be negative")
-                updates["tax_cents"] = update_data.tax_cents
-                
-            if update_data.tip_cents is not None:
-                if update_data.tip_cents < 0:
-                    raise ReceiptValidationError("Tip cannot be negative")
-                updates["tip_cents"] = update_data.tip_cents
+            # Charges - validate and convert
+            if update_data.charges is not None:
+                validate_charges(update_data.charges)
+                charges = [
+                    Charge(
+                        charge_id=charge.charge_id if hasattr(charge, 'charge_id') else str(ObjectId()),
+                        name=charge.name,
+                        unit_price_cents=charge.unit_price_cents,
+                        taxable=charge.taxable,
+                        splits=[
+                            Split(
+                                user_id=ObjectId(split.user_id),
+                                share_quantity=split.share_quantity
+                            )
+                            for split in charge.splits
+                        ]
+                    )
+                    for charge in update_data.charges
+                ]
+                updates["charges"] = [charge.model_dump(mode="python") for charge in charges]
             
             # Calculate subtotal and total
             items_to_calc = update_data.items if update_data.items is not None else []
+            charges_to_calc = update_data.charges if update_data.charges is not None else existing.get("charges", [])
+            
             if items_to_calc or update_data.items is not None:
                 subtotal = calculate_subtotal(items_to_calc) if items_to_calc else 0
                 updates["subtotal_cents"] = subtotal
-                updates["total_cents"] = calculate_total(subtotal, tax_cents, tip_cents)
-            elif update_data.tax_cents is not None or update_data.tip_cents is not None:
-                # Recalculate total if tax or tip changed
+                updates["total_cents"] = calculate_total(subtotal, charges_to_calc)
+            elif update_data.charges is not None:
+                # Recalculate total if charges changed
                 subtotal = existing.get("subtotal_cents", 0)
-                updates["total_cents"] = calculate_total(subtotal, tax_cents, tip_cents)
+                updates["total_cents"] = calculate_total(subtotal, charges_to_calc)
             
             # Increment version and update timestamp
             updates["version"] = existing["version"] + 1
@@ -377,3 +388,26 @@ class ReceiptRepository:
         
         return finalized_receipt, ledger_entries
 
+    async def soft_delete_receipt(self, receipt_id: str, user_id: str) -> bool:
+        """
+        Soft delete a receipt (owner only).
+        
+        Returns True if deleted, False if not found or not owner.
+        """
+        try:
+            result = await self.collection.update_one(
+                {
+                    "_id": ObjectId(receipt_id),
+                    "owner_id": ObjectId(user_id),
+                    "is_deleted": False
+                },
+                {
+                    "$set": {
+                        "is_deleted": True,
+                        "updated_at": datetime.now(timezone.utc)
+                    }
+                }
+            )
+            return result.modified_count > 0
+        except Exception:
+            return False

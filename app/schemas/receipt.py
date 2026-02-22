@@ -14,6 +14,7 @@ class ItemBase(BaseModel):
     name: str
     unit_price_cents: int  # Integer cents
     quantity: float
+    taxable: bool = True  # Whether this item is subject to tax
     splits: List[SplitBase] = []
     
     model_config = {"from_attributes": True}
@@ -27,6 +28,14 @@ class ParticipantBase(BaseModel):
 class PaymentBase(BaseModel):
     user_id: str
     amount_paid_cents: int  # Integer cents
+    
+    model_config = {"from_attributes": True}
+
+class ChargeBase(BaseModel):
+    name: str
+    unit_price_cents: int
+    taxable: bool = False  # Whether this charge itself is taxable (usually false)
+    splits: List[SplitBase] = []
     
     model_config = {"from_attributes": True}
 
@@ -49,13 +58,15 @@ class ReceiptUpdate(BaseModel):
     comments: Optional[str] = None
     folder_id: Optional[str] = None
     items: Optional[List[ItemBase]] = None
+    charges: Optional[List[ChargeBase]] = None
     payments: Optional[List[PaymentBase]] = None
-    tax_cents: Optional[int] = None
-    tip_cents: Optional[int] = None
     version: int  # Required for optimistic locking
 
 class ItemResponse(ItemBase):
     item_id: str
+
+class ChargeResponse(ChargeBase):
+    charge_id: str
 
 class ParticipantResponse(ParticipantBase):
     joined_at: datetime
@@ -65,8 +76,6 @@ class ReceiptResponse(ReceiptBase):
     owner_id: str
     status: ReceiptStatus
     subtotal_cents: int
-    tax_cents: int
-    tip_cents: int
     total_cents: int
     version: int
     created_at: datetime
@@ -74,6 +83,7 @@ class ReceiptResponse(ReceiptBase):
     
     participants: List[ParticipantResponse]
     items: List[ItemResponse]
+    charges: List[ChargeResponse]
     payments: List[PaymentBase]
 
     model_config = {"from_attributes": True, "populate_by_name": True}

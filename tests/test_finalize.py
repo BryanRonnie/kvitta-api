@@ -103,7 +103,7 @@ async def test_finalize_receipt_with_ledger(test_client, valid_token):
     )
     
     # Add items (split between user and Bob) and payments (only user pays)
-    test_client.patch(
+    patch_response = test_client.patch(
         f"/receipts/{receipt_id}",
         headers={"Authorization": f"Bearer {valid_token}"},
         json={
@@ -125,6 +125,11 @@ async def test_finalize_receipt_with_ledger(test_client, valid_token):
         }
     )
     
+    if patch_response.status_code != status.HTTP_200_OK:
+        print(f"Patch error: {patch_response.status_code} - {patch_response.text}")
+    
+    assert patch_response.status_code == status.HTTP_200_OK, f"Patch failed: {patch_response.text}"
+    
     # Finalize
     response = test_client.post(
         f"/receipts/{receipt_id}/finalize",
@@ -132,7 +137,7 @@ async def test_finalize_receipt_with_ledger(test_client, valid_token):
     )
     
     if response.status_code != status.HTTP_200_OK:
-        print(f"Finalize error: {response.json()}")
+        print(f"Finalize error ({response.status_code}): {response.text}")
     
     assert response.status_code == status.HTTP_200_OK
     data = response.json()

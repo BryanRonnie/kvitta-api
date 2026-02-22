@@ -15,7 +15,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 
 from app.models.ledger import LedgerEntry
-from app.models.receipt import Receipt
+from app.models.receipt import Receipt, ReceiptStatus
 from app.utils.receipt_validation import ReceiptValidationError
 
 
@@ -39,7 +39,7 @@ class LedgerRepository:
         Returns list of created entries.
         Raises ReceiptValidationError if calculation fails.
         """
-        if receipt.status != "finalized":
+        if receipt.status.value != "finalized":
             raise ReceiptValidationError("Can only create ledger for finalized receipts")
 
         if receipt.total_cents <= 0:
@@ -210,7 +210,7 @@ class LedgerRepository:
 
     def _calculate_user_liabilities(self, receipt: Receipt) -> Dict[str, int]:
         """
-        Calculate what each participant owes for their item shares.
+        Calculate what each participant owes for their item shares and charges.
         
         Returns: { user_id: their_share_of_total_cents }
         """
@@ -220,50 +220,50 @@ class LedgerRepository:
         for p in receipt.participants:
             liabilities[str(p.user_id)] = 0
         
-        if not receipt.items or receipt.subtotal_cents <= 0:
+        if receipt.subtotal_cents <= 0:
             return liabilities
         
-        # For each item, calculate per-participant liability
-        total_split_qty = sum(
-            sum(s.share_quantity for s in item.splits) if item.splits else 0
-            for item in receipt.items
-        )
-        
-        if total_split_qty == 0:
-            return liabilities
-        
-        for item in receipt.items:
-            if not item.splits:
-                continue
-            
-            item_subtotal = item.unit_price_cents * item.quantity
-            item_split_qty = sum(s.share_quantity for s in item.splits)
-            
-            if item_split_qty == 0:
-                continue
-            
-            # Allocate item cost proportionally
-            for split in item.splits:
-                user_id = str(split.user_id)
-                # Item's share of this total
-                item_share_ratio = split.share_quantity / item_split_qty
-                item_liability = int(item_subtotal * item_share_ratio)
-                liabilities[user_id] = liabilities.get(user_id, 0) + item_liability
-        
-        # Allocate tax and tip proportionally to all participants
-        if receipt.tax_cents > 0 or receipt.tip_cents > 0:
-            allocation_cents = receipt.tax_cents + receipt.tip_cents
-            num_participants = len(receipt.participants)
-            
-            if num_participants > 0:
-                per_user = allocation_cents // num_participants
-                remainder = allocation_cents % num_participants
+        # Calculate item liabilities
+        if receipt.items:
+            for item in receipt.items:
+                if not item.splits:
+                    continue
                 
-                for i, p in enumerate(receipt.participants):
-                    user_id = str(p.user_id)
-                    # Distribute remainder to first few users
-                    extra = 1 if i < remainder else 0
-                    liabilities[user_id] = liabilities.get(user_id, 0) + per_user + extra
+                item_subtotal = item.unit_price_cents * item.quantity
+                item_split_qty = sum(s.share_quantity for s in item.splits)
+                
+                if item_split_qty == 0:
+                    continue
+                
+                # Allocate item cost proportionally
+                for split in item.splits:
+                    user_id = str(split.user_id)
+                    # Item's share of this total
+                    item_share_ratio = split.share_quantity / item_split_qty
+                    item_liability = int(item_subtotal * item_share_ratio)
+                    liabilities[user_id] = liabilities.get(user_id, 0) + item_liability
+        
+        # Allocate charges (taxes, tips, fees, etc.) based on their splits
+        if receipt.charges:
+            for charge in receipt.charges:
+                if charge.splits:
+                    # If splits are specified, allocate according to splits
+                    for split in charge.splits:
+                        user_id = str(split.user_id)
+                        charge_liability = int(charge.unit_price_cents * split.share_quantity)
+                        liabilities[user_id] = liabilities.get(user_id, 0) + charge_liability
+                else:
+                    # If no splits, allocate equally to all participants
+                    num_participants = len(receipt.participants)
+                    if num_participants > 0:
+                        per_user = charge.unit_price_cents // num_participants
+                        remainder = charge.unit_price_cents % num_participants
+                        
+                        for i, p in enumerate(receipt.participants):
+                            user_id = str(p.user_id)
+                            # Distribute remainder to first few users
+                            extra = 1 if i < remainder else 0
+                            liabilities[user_id] = liabilities.get(user_id, 0) + per_user + extra
         
         return liabilities
 

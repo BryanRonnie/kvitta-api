@@ -1,9 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 
 from app.db.mongo import get_db
 from app.core.auth import get_current_user
 from app.models.user import UserResponse
-from app.models.folder import FolderCreate, FolderUpdate, FolderResponse
+from app.models.folder import FolderCreate, FolderUpdate, FolderResponse, FolderWithCount
 from app.repositories.folder_repo import FolderRepository
 
 router = APIRouter(prefix="/folders", tags=["folders"])
@@ -29,15 +29,31 @@ async def create_folder(
     )
 
 
-@router.get("", response_model=list[FolderResponse])
+@router.get("", response_model=list[FolderResponse] | list[FolderWithCount])
 async def list_folders(
+    include_counts: bool = Query(False, description="Include receipt count for each folder"),
     current_user: UserResponse = Depends(get_current_user),
     db = Depends(get_db)
 ):
     """List folders for the current user."""
     repo = FolderRepository(db)
+    
+    if include_counts:
+        folders_data = await repo.get_folders_with_counts(current_user.id)
+        return [
+            FolderWithCount(
+                id=str(folder["_id"]),
+                name=folder["name"],
+                color=folder["color"],
+                owner_id=str(folder["owner_id"]),
+                created_at=folder["created_at"],
+                updated_at=folder["updated_at"],
+                receipt_count=folder["receipt_count"]
+            )
+            for folder in folders_data
+        ]
+    
     folders = await repo.list_folders(current_user.id)
-
     return [
         FolderResponse(
             id=str(folder._id),

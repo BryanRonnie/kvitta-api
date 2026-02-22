@@ -34,6 +34,11 @@ class FolderResponse(FolderBase):
     )
 
 
+class FolderWithCount(FolderResponse):
+    """Folder response with receipt count."""
+    receipt_count: int = 0
+
+
 class FolderInDB(BaseModel):
     """Folder database schema."""
     id: ObjectId = Field(alias="_id")

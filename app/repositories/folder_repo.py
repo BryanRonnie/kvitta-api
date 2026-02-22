@@ -90,3 +90,53 @@ class FolderRepository:
         except Exception:
             return None
         return None
+
+    async def get_folders_with_counts(self, owner_id: str) -> list[dict]:
+        """List folders with receipt counts."""
+        pipeline = [
+            {
+                "$match": {
+                    "owner_id": ObjectId(owner_id),
+                    "is_deleted": False
+                }
+            },
+            {
+                "$lookup": {
+                    "from": "receipts",
+                    "let": {"folder_id": "$_id"},
+                    "pipeline": [
+                        {
+                            "$match": {
+                                "$expr": {"$eq": ["$folder_id", "$$folder_id"]},
+                                "is_deleted": False
+                            }
+                        },
+                        {"$count": "total"}
+                    ],
+                    "as": "receipt_data"
+                }
+            },
+            {
+                "$project": {
+                    "_id": 1,
+                    "name": 1,
+                    "color": 1,
+                    "owner_id": 1,
+                    "created_at": 1,
+                    "updated_at": 1,
+                    "receipt_count": {
+                        "$cond": [
+                            {"$gt": [{"$size": "$receipt_data"}, 0]},
+                            {"$arrayElemAt": ["$receipt_data.total", 0]},
+                            0
+                        ]
+                    }
+                }
+            },
+            {
+                "$sort": {"created_at": -1}
+            }
+        ]
+        
+        cursor = self.collection.aggregate(pipeline)
+        return await cursor.to_list(None)
