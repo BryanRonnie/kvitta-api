@@ -359,17 +359,16 @@ class LedgerRepository:
 
     async def delete_entries_for_receipt(self, receipt_id: str) -> int:
         """Soft-delete all entries for a receipt (for unfinalizing)."""
-        try:
-            oid = ObjectId(receipt_id)
-        except:
-            return 0
-        
+        match = {"receipt_id": receipt_id}
+        if ObjectId.is_valid(receipt_id):
+            match = {"$or": [{"receipt_id": receipt_id}, {"receipt_id": ObjectId(receipt_id)}]}
+
         result = await self.collection.update_many(
-            {"receipt_id": oid},
+            match,
             {
                 "$set": {
                     "is_deleted": True,
-                    "updated_at": datetime.utcnow()
+                    "updated_at": datetime.now(timezone.utc)
                 }
             }
         )

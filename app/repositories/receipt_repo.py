@@ -44,6 +44,7 @@ class ReceiptRepository:
             "participants": [owner_participant.model_dump(mode="python")],
             "items": [],
             "charges": [],
+            "settle_summary": [],
             "payments": [],
             "subtotal_cents": 0,
             "total_cents": 0,
@@ -89,6 +90,151 @@ class ReceiptRepository:
         receipts = await cursor.to_list(None)
         return [Receipt(**doc) for doc in receipts]
 
+    def _build_settle_summary(
+        self,
+        participants: list[Participant],
+        items: list[Item],
+        charges: list[Charge],
+        payments: list[Payment]
+    ) -> list[dict]:
+        """Compute per-user settle summary from items, charges, and payments."""
+        if not participants:
+            return []
+
+        liabilities: dict[str, int] = {}
+        for participant in participants:
+            liabilities[str(participant.user_id)] = 0
+
+        payments_by_user: dict[str, int] = {}
+        for payment in payments:
+            user_id = str(payment.user_id)
+            payments_by_user[user_id] = payments_by_user.get(user_id, 0) + payment.amount_paid_cents
+
+        # Item liabilities
+        for item in items:
+            if not item.splits:
+                continue
+
+            item_subtotal = item.unit_price_cents * item.quantity
+            item_split_qty = sum(s.share_quantity for s in item.splits)
+
+            if item_split_qty == 0:
+                continue
+
+            for split in item.splits:
+                user_id = str(split.user_id)
+                item_share_ratio = split.share_quantity / item_split_qty
+                item_liability = int(item_subtotal * item_share_ratio)
+                liabilities[user_id] = liabilities.get(user_id, 0) + item_liability
+
+        # Charge liabilities
+        for charge in charges:
+            if charge.splits:
+                for split in charge.splits:
+                    user_id = str(split.user_id)
+                    charge_liability = int(charge.unit_price_cents * split.share_quantity)
+                    liabilities[user_id] = liabilities.get(user_id, 0) + charge_liability
+            else:
+                num_participants = len(participants)
+                if num_participants > 0:
+                    per_user = charge.unit_price_cents // num_participants
+                    remainder = charge.unit_price_cents % num_participants
+
+                    for index, participant in enumerate(participants):
+                        user_id = str(participant.user_id)
+                        extra = 1 if index < remainder else 0
+                        liabilities[user_id] = liabilities.get(user_id, 0) + per_user + extra
+
+        summary: list[dict] = []
+        for participant in participants:
+            user_id = str(participant.user_id)
+            liability_cents = liabilities.get(user_id, 0)
+            paid_cents = payments_by_user.get(user_id, 0)
+            net_cents = liability_cents - paid_cents
+            amount_cents = max(net_cents, 0)
+            is_settled = net_cents == 0
+            if net_cents < 0:
+                status = "creditor"
+            elif net_cents == 0:
+                status = "settled"
+            else:
+                status = "pending"
+            summary.append({
+                "user_id": user_id,
+                "amount_cents": amount_cents,
+                "paid_cents": paid_cents,
+                "net_cents": net_cents,
+                "settled_amount_cents": 0,
+                "is_settled": is_settled,
+                "settled_at": None,
+                "status": status
+            })
+
+        return summary
+
+    async def update_settle_summary_from_ledger(self, receipt_id: str) -> bool:
+        """Update settle summary using ledger settlements for a receipt."""
+        try:
+            if not ObjectId.is_valid(receipt_id):
+                return False
+            receipt_oid = ObjectId(receipt_id)
+            receipt_doc = await self.collection.find_one({
+                "_id": receipt_oid,
+                "is_deleted": False
+            })
+            if not receipt_doc:
+                return False
+
+            participants = [Participant(**p) for p in receipt_doc.get("participants", [])]
+            items = [Item(**item) for item in receipt_doc.get("items", [])]
+            charges = [Charge(**charge) for charge in receipt_doc.get("charges", [])]
+            payments = [Payment(**payment) for payment in receipt_doc.get("payments", [])]
+            base_summary = self._build_settle_summary(participants, items, charges, payments)
+
+            from app.repositories.ledger_repo import LedgerRepository
+            ledger_repo = LedgerRepository(self.db)
+            entries = await ledger_repo.get_ledger_by_receipt(str(receipt_doc.get("_id")))
+
+            settled_by_debtor: dict[str, int] = {}
+            for entry in entries:
+                if entry.is_deleted:
+                    continue
+                settled_by_debtor[entry.debtor_id] = (
+                    settled_by_debtor.get(entry.debtor_id, 0) + entry.settled_amount_cents
+                )
+
+            now = datetime.now(timezone.utc)
+            for summary in base_summary:
+                user_id = summary["user_id"]
+                settled_amount = min(
+                    summary["amount_cents"],
+                    settled_by_debtor.get(user_id, 0)
+                )
+                summary["settled_amount_cents"] = settled_amount
+                summary["is_settled"] = settled_amount >= summary["amount_cents"]
+                if summary["is_settled"] and summary["amount_cents"] > 0:
+                    summary["status"] = "settled"
+                    summary["settled_at"] = now
+                elif settled_amount > 0:
+                    summary["status"] = "partially_settled"
+                    summary["settled_at"] = None
+                else:
+                    summary["status"] = "pending"
+                    summary["settled_at"] = None
+
+            result = await self.collection.update_one(
+                {"_id": receipt_oid},
+                {
+                    "$set": {
+                        "settle_summary": base_summary,
+                        "updated_at": now
+                    }
+                }
+            )
+            return result.modified_count > 0
+        except Exception:
+            return False
+
     async def update_receipt(
         self,
         receipt_id: str,
@@ -129,6 +275,8 @@ class ReceiptRepository:
             
             # Build update dict
             updates = {}
+            items_models = None
+            charges_models = None
             
             # Simple fields (each can be updated independently for autosave)
             if update_data.title is not None:
@@ -161,6 +309,7 @@ class ReceiptRepository:
                     for item in update_data.items
                 ]
                 updates["items"] = [item.model_dump(mode="python") for item in items]
+                items_models = items
             
             # Payments - validate and convert
             if update_data.payments is not None:
@@ -194,19 +343,45 @@ class ReceiptRepository:
                     for charge in update_data.charges
                 ]
                 updates["charges"] = [charge.model_dump(mode="python") for charge in charges]
+                charges_models = charges
             
             # Calculate subtotal and total
             items_to_calc = update_data.items if update_data.items is not None else []
-            charges_to_calc = update_data.charges if update_data.charges is not None else existing.get("charges", [])
+            charges_models_for_calc = charges_models
+            if charges_models_for_calc is None:
+                charges_models_for_calc = [Charge(**charge) for charge in existing.get("charges", [])]
             
             if items_to_calc or update_data.items is not None:
                 subtotal = calculate_subtotal(items_to_calc) if items_to_calc else 0
                 updates["subtotal_cents"] = subtotal
-                updates["total_cents"] = calculate_total(subtotal, charges_to_calc)
+                updates["total_cents"] = calculate_total(subtotal, charges_models_for_calc)
             elif update_data.charges is not None:
                 # Recalculate total if charges changed
                 subtotal = existing.get("subtotal_cents", 0)
-                updates["total_cents"] = calculate_total(subtotal, charges_to_calc)
+                updates["total_cents"] = calculate_total(subtotal, charges_models_for_calc)
+
+            participants_models = [Participant(**p) for p in existing.get("participants", [])]
+            if items_models is None:
+                items_models = [Item(**item) for item in existing.get("items", [])]
+            if charges_models is None:
+                charges_models = charges_models_for_calc
+            payments_models = []
+            if update_data.payments is not None:
+                payments_models = [
+                    Payment(
+                        user_id=ObjectId(p.user_id),
+                        amount_paid_cents=p.amount_paid_cents
+                    )
+                    for p in update_data.payments
+                ]
+            else:
+                payments_models = [Payment(**p) for p in existing.get("payments", [])]
+            updates["settle_summary"] = self._build_settle_summary(
+                participants_models,
+                items_models,
+                charges_models,
+                payments_models
+            )
             
             # Increment version and update timestamp
             updates["version"] = existing["version"] + 1
@@ -387,6 +562,51 @@ class ReceiptRepository:
         ledger_entries = await ledger_repo.insert_ledger_entries(finalized_receipt)
         
         return finalized_receipt, ledger_entries
+
+    async def unfinalize_receipt(self, receipt_id: str, user_id: str) -> Optional[Receipt]:
+        """Revert a finalized receipt back to draft and remove ledger entries."""
+        try:
+            receipt_oid = ObjectId(receipt_id)
+            user_oid = ObjectId(user_id)
+        except Exception:
+            raise ReceiptValidationError("Invalid receipt ID")
+
+        receipt_doc = await self.collection.find_one({
+            "_id": receipt_oid,
+            "owner_id": user_oid,
+            "is_deleted": False
+        })
+        if not receipt_doc:
+            return None
+
+        if receipt_doc.get("status") != "finalized":
+            raise ReceiptValidationError("Can only unfinalize a finalized receipt")
+
+        from app.repositories.ledger_repo import LedgerRepository
+        ledger_repo = LedgerRepository(self.db)
+        await ledger_repo.delete_entries_for_receipt(receipt_id)
+
+        now = datetime.now(timezone.utc)
+        result = await self.collection.find_one_and_update(
+            {
+                "_id": receipt_oid,
+                "owner_id": user_oid,
+                "is_deleted": False
+            },
+            {
+                "$set": {
+                    "status": "draft",
+                    "updated_at": now,
+                    "updated_by": user_oid
+                },
+                "$inc": {"version": 1}
+            },
+            return_document=True
+        )
+
+        if result:
+            return Receipt(**result)
+        return None
 
     async def soft_delete_receipt(self, receipt_id: str, user_id: str) -> bool:
         """

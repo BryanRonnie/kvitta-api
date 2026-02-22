@@ -73,6 +73,19 @@ def _to_receipt_response(receipt: Receipt) -> ReceiptResponse:
             }
             for p in receipt.payments
         ],
+        settle_summary=[
+            {
+                "user_id": entry.user_id,
+                "amount_cents": entry.amount_cents,
+                "paid_cents": entry.paid_cents,
+                "net_cents": entry.net_cents,
+                "settled_amount_cents": entry.settled_amount_cents,
+                "is_settled": entry.is_settled,
+                "settled_at": entry.settled_at,
+                "status": entry.status
+            }
+            for entry in receipt.settle_summary
+        ],
         subtotal_cents=receipt.subtotal_cents,
         total_cents=receipt.total_cents,
         version=receipt.version,
@@ -364,6 +377,37 @@ async def finalize_receipt(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Finalization failed: {str(e)}"
+        )
+
+
+@router.post("/{receipt_id}/unfinalize", response_model=ReceiptResponse)
+async def unfinalize_receipt(
+    receipt_id: str,
+    current_user: UserResponse = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Unfinalize a receipt (owner only)."""
+    receipt_repo = ReceiptRepository(db)
+
+    receipt = await receipt_repo.get_receipt(receipt_id, current_user.id)
+    if not receipt or str(receipt.owner_id) != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Receipt not found or you are not the owner"
+        )
+
+    try:
+        updated = await receipt_repo.unfinalize_receipt(receipt_id, current_user.id)
+        if not updated:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Receipt not found or you are not the owner"
+            )
+        return _to_receipt_response(updated)
+    except ReceiptValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
         )
 
 

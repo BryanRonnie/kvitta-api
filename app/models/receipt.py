@@ -35,6 +35,17 @@ class Charge(BaseModel):
     taxable: bool = False  # Whether this charge itself is taxable (usually false)
     splits: List[Split] = []  # If empty, charged to all equally; if specified, only to those users
 
+class SettleSummaryEntry(BaseModel):
+    """Per-user settle summary (calculated from items + charges)."""
+    user_id: str
+    amount_cents: int
+    paid_cents: int = 0
+    net_cents: int = 0
+    settled_amount_cents: int = 0
+    is_settled: bool = False
+    settled_at: Optional[datetime] = None
+    status: str = "pending"
+
 class Payment(BaseModel):
     user_id: PyObjectId
     amount_paid_cents: int  # Integer cents
@@ -50,6 +61,7 @@ class Receipt(MongoModel):
     participants: List[Participant] = []
     items: List[Item] = []
     charges: List[Charge] = []  # Dynamic charges (tax, tip, fees)
+    settle_summary: List[SettleSummaryEntry] = []
     payments: List[Payment] = []
     
     # All monetary values in integer cents

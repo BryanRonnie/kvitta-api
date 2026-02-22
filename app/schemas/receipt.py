@@ -68,6 +68,16 @@ class ItemResponse(ItemBase):
 class ChargeResponse(ChargeBase):
     charge_id: str
 
+class SettleSummaryEntry(BaseModel):
+    user_id: str
+    amount_cents: int
+    paid_cents: int = 0
+    net_cents: int = 0
+    settled_amount_cents: int = 0
+    is_settled: bool = False
+    settled_at: Optional[datetime] = None
+    status: str = "pending"
+
 class ParticipantResponse(ParticipantBase):
     joined_at: datetime
 
@@ -84,6 +94,7 @@ class ReceiptResponse(ReceiptBase):
     participants: List[ParticipantResponse]
     items: List[ItemResponse]
     charges: List[ChargeResponse]
+    settle_summary: List[SettleSummaryEntry]
     payments: List[PaymentBase]
 
     model_config = {"from_attributes": True, "populate_by_name": True}

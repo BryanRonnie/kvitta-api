@@ -7,6 +7,7 @@ from app.db.mongo import connect_to_mongo, disconnect_from_mongo
 from app.routes.auth import router as auth_router
 from app.routes.folders import router as folders_router
 from app.routes.receipts import router as receipts_router
+from app.routes.ledger import router as ledger_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -42,6 +43,7 @@ async def health_check():
 app.include_router(auth_router)
 app.include_router(folders_router)
 app.include_router(receipts_router)
+app.include_router(ledger_router)
 
 if __name__ == "__main__":
     import uvicorn
