@@ -5,7 +5,7 @@ Finalization locks a receipt, generates immutable ledger entries,
 and marks it as ready for settlement.
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from datetime import datetime
 from typing import List
 
@@ -26,8 +26,7 @@ class LedgerEntryResponse(BaseModel):
     description: str
     created_at: datetime
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class ReceiptFinalizeResponse(BaseModel):
@@ -41,5 +40,4 @@ class ReceiptFinalizeResponse(BaseModel):
     updated_at: datetime
     ledger_entries: List[LedgerEntryResponse]
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)

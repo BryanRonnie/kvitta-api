@@ -10,7 +10,7 @@ Core algorithm:
 """
 
 from typing import List, Optional, Dict, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 
@@ -58,7 +58,7 @@ class LedgerRepository:
         entries = self._match_debtors_creditors(receipt.id, net_positions)
         
         # Insert to DB
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         entries_docs = []
         for entry in entries:
             entry.created_at = now
@@ -195,7 +195,7 @@ class LedgerRepository:
                 "$set": {
                     "settled_amount_cents": new_settled,
                     "status": new_status,
-                    "updated_at": datetime.utcnow()
+                    "updated_at": datetime.now(timezone.utc)
                 }
             },
             return_document=True
