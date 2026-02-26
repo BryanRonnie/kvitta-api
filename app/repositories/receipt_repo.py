@@ -23,13 +23,26 @@ class ReceiptRepository:
         self.db = db
         self.collection = db["receipts"]
 
+    async def _get_user_name(self, user_id: str) -> str:
+        """Fetch user name from database."""
+        try:
+            user = await self.db["users"].find_one({
+                "_id": ObjectId(user_id),
+                "is_deleted": False
+            })
+            return user.get("name", "Unknown User") if user else "Unknown User"
+        except Exception:
+            return "Unknown User"
+
     async def create_receipt(self, receipt_data: ReceiptCreate, owner_id: str) -> Receipt:
         """Create a new draft receipt with owner as first participant."""
         owner_oid = ObjectId(owner_id)
+        owner_name = await self._get_user_name(owner_id)
         
         # Owner automatically added as participant with "owner" role
         owner_participant = Participant(
             user_id=owner_oid,
+            name=owner_name,
             role="owner",
             joined_at=datetime.now(timezone.utc)
         )
@@ -423,6 +436,9 @@ class ReceiptRepository:
             if existing:
                 return None  # Already a member
             
+            # Fetch user name
+            user_name = await self._get_user_name(user_id)
+            
             # Add member
             result = await self.collection.find_one_and_update(
                 {"_id": ObjectId(receipt_id)},
@@ -430,6 +446,7 @@ class ReceiptRepository:
                     "$push": {
                         "participants": Participant(
                             user_id=user_oid,
+                            name=user_name,
                             role="member",
                             joined_at=datetime.now(timezone.utc)
                         ).model_dump(mode="python")

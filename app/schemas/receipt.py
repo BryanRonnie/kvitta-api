@@ -21,6 +21,7 @@ class ItemBase(BaseModel):
 
 class ParticipantBase(BaseModel):
     user_id: str
+    name: Optional[str] = None
     role: str = "member"
     
     model_config = {"from_attributes": True}

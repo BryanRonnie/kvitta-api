@@ -12,6 +12,7 @@ class ReceiptStatus(str, Enum):
 # Embedded documents don't need MongoModel (no separate _id)
 class Participant(BaseModel):
     user_id: PyObjectId
+    name: Optional[str] = None  # User's name for display (fetched from user db if missing)
     role: str = "member"  # "owner" or "member"
     joined_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

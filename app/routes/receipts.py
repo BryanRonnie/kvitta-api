@@ -15,8 +15,26 @@ from app.utils.receipt_validation import ReceiptValidationError
 router = APIRouter(prefix="/receipts", tags=["receipts"])
 
 
-def _to_receipt_response(receipt: Receipt) -> ReceiptResponse:
-    """Convert Receipt model to ReceiptResponse schema."""
+async def _to_receipt_response(receipt: Receipt, user_repo: UserRepository = None) -> ReceiptResponse:
+    """Convert Receipt model to ReceiptResponse schema with participant names."""
+    # Use stored names from participants, fallback to fetching if needed
+    participants_data = []
+    for p in receipt.participants:
+        name = p.name
+        # If name is not stored in participant, fetch it from user database
+        if not name and user_repo:
+            user = await user_repo.get_user_by_id(str(p.user_id))
+            name = user.name if user else "Unknown User"
+        elif not name:
+            name = "Unknown User"
+            
+        participants_data.append({
+            "user_id": str(p.user_id),
+            "name": name,
+            "role": p.role,
+            "joined_at": p.joined_at
+        })
+    
     return ReceiptResponse(
         id=str(receipt.id),
         owner_id=str(receipt.owner_id),
@@ -25,14 +43,7 @@ def _to_receipt_response(receipt: Receipt) -> ReceiptResponse:
         description=receipt.description,
         comments=receipt.comments,
         status=receipt.status,
-        participants=[
-            {
-                "user_id": str(p.user_id),
-                "role": p.role,
-                "joined_at": p.joined_at
-            }
-            for p in receipt.participants
-        ],
+        participants=participants_data,
         items=[
             {
                 "item_id": str(item.item_id),
@@ -103,7 +114,7 @@ async def create_receipt(
     """Create a new draft receipt. Owner automatically added as participant."""
     repo = ReceiptRepository(db)
     receipt = await repo.create_receipt(receipt_data, current_user.id)
-    return _to_receipt_response(receipt)
+    return await _to_receipt_response(receipt)
 
 
 @router.get("", response_model=List[ReceiptResponse])
@@ -113,8 +124,9 @@ async def list_receipts(
 ):
     """List receipts where user is owner or participant."""
     repo = ReceiptRepository(db)
+    user_repo = UserRepository(db)
     receipts = await repo.list_receipts(current_user.id)
-    return [_to_receipt_response(receipt) for receipt in receipts]
+    return [await _to_receipt_response(receipt, user_repo) for receipt in receipts]
 
 
 @router.get("/{receipt_id}", response_model=ReceiptResponse)
@@ -125,6 +137,7 @@ async def get_receipt(
 ):
     """Get a receipt by ID if user is owner or participant."""
     repo = ReceiptRepository(db)
+    user_repo = UserRepository(db)
     receipt = await repo.get_receipt(receipt_id, current_user.id)
     
     if not receipt:
@@ -133,7 +146,7 @@ async def get_receipt(
             detail="Receipt not found"
         )
 
-    return _to_receipt_response(receipt)
+    return await _to_receipt_response(receipt, user_repo)
 
 
 @router.patch("/{receipt_id}", response_model=ReceiptResponse)
@@ -152,6 +165,7 @@ async def update_receipt(
     - Validates: non-negative values, split sum == quantity
     """
     repo = ReceiptRepository(db)
+    user_repo = UserRepository(db)
     
     try:
         receipt = await repo.update_receipt(receipt_id, current_user.id, update_data)
@@ -162,7 +176,7 @@ async def update_receipt(
                 detail="Receipt not found or you are not the owner"
             )
         
-        return _to_receipt_response(receipt)
+        return await _to_receipt_response(receipt, user_repo)
         
     except ReceiptValidationError as e:
         raise HTTPException(
@@ -220,7 +234,7 @@ async def add_member(
             detail="Member already exists in receipt or error adding member"
         )
     
-    return _to_receipt_response(updated_receipt)
+    return await _to_receipt_response(updated_receipt, user_repo)
 
 
 @router.get("/{receipt_id}/members", response_model=List[MemberResponse])
@@ -397,13 +411,14 @@ async def unfinalize_receipt(
         )
 
     try:
+        user_repo = UserRepository(db)
         updated = await receipt_repo.unfinalize_receipt(receipt_id, current_user.id)
         if not updated:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Receipt not found or you are not the owner"
             )
-        return _to_receipt_response(updated)
+        return await _to_receipt_response(updated, user_repo)
     except ReceiptValidationError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
