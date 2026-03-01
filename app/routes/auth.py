@@ -70,3 +70,22 @@ async def login(
 async def get_me(current_user: UserResponse = Depends(get_current_user)):
     """Get current user details."""
     return current_user
+
+
+@router.post("/logout", response_model=dict)
+async def logout(current_user: UserResponse = Depends(get_current_user)):
+    """
+    Logout current user.
+    
+    Frontend MUST:
+    1. Remove token from localStorage/sessionStorage
+    2. Clear all auth state
+    3. Redirect to /login
+    
+    Failure to clear token on frontend will cause infinite redirect loop.
+    """
+    return {
+        "status": "success",
+        "message": "Logged out successfully",
+        "user_id": current_user.id
+    }

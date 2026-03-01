@@ -19,3 +19,17 @@ class LedgerEntryResponse(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(populate_by_name=True)
+
+class CounterpartyResponse(BaseModel):
+    user_id: str
+    name: str                   # resolved from user lookup
+    they_owe_me_cents: int
+    i_owe_them_cents: int
+    net_cents: int              # positive = they owe me, negative = I owe them
+
+class MeSummaryResponse(BaseModel):
+    user_id: str
+    total_i_owe_cents: int      # sum of all i_owe_them across counterparties
+    total_owed_to_me_cents: int # sum of all they_owe_me across counterparties
+    net_cents: int
+    counterparties: list[CounterpartyResponse]

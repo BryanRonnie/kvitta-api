@@ -74,3 +74,19 @@ class UserRepository:
             return result.modified_count > 0
         except Exception:
             return False
+
+    async def get_users_by_ids(self, user_ids: list[str]) -> list[UserInDB]:
+        """Get multiple users by their IDs."""
+        if not user_ids:
+            return []
+        
+        try:
+            object_ids = [ObjectId(uid) for uid in user_ids if ObjectId.is_valid(uid)]
+            cursor = self.collection.find({
+                "_id": {"$in": object_ids},
+                "is_deleted": False
+            })
+            users = await cursor.to_list(None)
+            return [UserInDB(**u) for u in users]
+        except Exception:
+            return []

@@ -55,7 +55,7 @@ class LedgerRepository:
         net_positions = self._calculate_net_positions(user_liabilities, user_payments)
         
         # Determine who pays whom (simple: positive net owes to negative net)
-        entries = self._match_debtors_creditors(receipt.id, net_positions)
+        entries = self._match_debtors_creditors(str(receipt.id), net_positions)
         
         # Insert to DB
         now = datetime.now(timezone.utc)
@@ -373,3 +373,60 @@ class LedgerRepository:
             }
         )
         return result.modified_count
+
+
+    async def get_counterparties(self, user_id: str) -> List[Dict]:
+        """
+        Return all people who have a financial relationship with user_id
+        across all unsettled ledger entries.
+
+        Each counterparty dict:
+        {
+            "user_id": str,
+            "they_owe_me_cents": int,   # they are debtor, I am creditor
+            "i_owe_them_cents": int,    # I am debtor, they are creditor
+            "net_cents": int            # positive = they owe me net, negative = I owe them net
+        }
+        """
+        # Entries where I am the creditor (others owe me)
+        as_creditor = await self.collection.find({
+            "creditor_id": user_id,
+            "is_deleted": False,
+            "status": {"$ne": "settled"}
+        }).to_list(None)
+
+        # Entries where I am the debtor (I owe others)
+        as_debtor = await self.collection.find({
+            "debtor_id": user_id,
+            "is_deleted": False,
+            "status": {"$ne": "settled"}
+        }).to_list(None)
+
+        # Aggregate by counterparty
+        counterparties: Dict[str, Dict] = {}
+
+        for doc in as_creditor:
+            other = doc["debtor_id"]
+            open_amt = doc["amount_cents"] - doc.get("settled_amount_cents", 0)
+            if other not in counterparties:
+                counterparties[other] = {"they_owe_me_cents": 0, "i_owe_them_cents": 0}
+            counterparties[other]["they_owe_me_cents"] += open_amt
+
+        for doc in as_debtor:
+            other = doc["creditor_id"]
+            open_amt = doc["amount_cents"] - doc.get("settled_amount_cents", 0)
+            if other not in counterparties:
+                counterparties[other] = {"they_owe_me_cents": 0, "i_owe_them_cents": 0}
+            counterparties[other]["i_owe_them_cents"] += open_amt
+
+        result = []
+        for other_id, amounts in counterparties.items():
+            net = amounts["they_owe_me_cents"] - amounts["i_owe_them_cents"]
+            result.append({
+                "user_id": other_id,
+                "they_owe_me_cents": amounts["they_owe_me_cents"],
+                "i_owe_them_cents": amounts["i_owe_them_cents"],
+                "net_cents": net,  # positive = they owe me, negative = I owe them
+            })
+
+        return result
